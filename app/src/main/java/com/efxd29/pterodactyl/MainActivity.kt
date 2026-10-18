@@ -38,6 +38,16 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import android.text.InputType
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import org.json.JSONObject
+import java.nio.charset.StandardCharsets
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 class MainActivity : Activity() {
     private lateinit var web: WebView
@@ -51,6 +61,7 @@ class MainActivity : Activity() {
     private var diagnosing = false
     private var lastError = ""
 
+    private val sessionVault by lazy { SessionVault(applicationContext) }
     private fun dp(v: Int) = (v * resources.displayMetrics.density + 0.5f).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -125,10 +136,19 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(v: WebView, url: String?) {
                 progress.visibility = View.GONE
+                CookieManager.getInstance().flush()
                 if (reportPage != null && !url.isNullOrBlank()) hideReport()
-                // Poll only from inside this app; no website/server modification is required.
-                if (!url.isNullOrBlank() && (url.contains("pemai.net", true) || url.contains("127.0.0.1") || url.contains("192.168.") || url.contains("10.") || url.contains("172."))) {
+                if (!url.isNullOrBlank() && isPanelUrl(url)) {
+                    installSessionHelper()
                     installLiveUpdateMonitor()
+                    // Promote staged credentials only after the login form disappears,
+                    // which means the panel accepted the login and navigated successfully.
+                    web.evaluateJavascript("!!document.querySelector('input[type=password]')") { result ->
+                        if (!isFinishing && !isDestroyed && isPanelUrl(url)) {
+                            if (result == "false") sessionVault.promotePending()
+                            else if (result == "true") sessionVault.clearPending()
+                        }
+                    }
                 }
             }
 
@@ -375,12 +395,265 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (!::web.isInitialized) return@runOnUiThread
                 val current = web.url ?: route.url
-                // Clear only this WebView's HTTP resource cache; cookies and login storage remain.
+                // Cache only; never clear cookies, session storage or credentials here.
                 web.clearCache(false)
                 web.loadUrl(current)
-                Toast.makeText(this@MainActivity, "Pembaruan panel dimuat.", Toast.LENGTH_SHORT).show()
+                CookieManager.getInstance().flush()
             }
         }
+
+        @JavascriptInterface
+        fun stageLoginCredentials(json: String) {
+            if (!isTrustedPanelOrigin()) return
+            try {
+                val obj = JSONObject(json)
+                val username = obj.optString("username").trim()
+                val password = obj.optString("password")
+                if (username.isNotBlank() && password.isNotBlank() &&
+                    username.length <= 512 && password.length <= 4096) {
+                    sessionVault.stage(username, password)
+                }
+            } catch (_: Exception) { }
+        }
+
+        @JavascriptInterface
+        fun getSavedLoginCredentials(): String {
+            if (!isTrustedPanelOrigin()) return ""
+            return sessionVault.loadSaved() ?: ""
+        }
+
+        @JavascriptInterface
+        fun promoteLoginCredentials() {
+            if (isTrustedPanelOrigin()) sessionVault.promotePending()
+        }
+
+        @JavascriptInterface
+        fun clearLoginCredentials() {
+            if (isTrustedPanelOrigin()) sessionVault.clearAll()
+        }
+    }
+
+    private fun isPanelUrl(value: String): Boolean {
+        val uri = try { Uri.parse(value) } catch (_: Exception) { return false }
+        val host = uri.host?.lowercase() ?: return false
+        if (uri.scheme != "https" && uri.scheme != "http") return false
+        return host == "pemai.net" || host == "www.pemai.net" ||
+            host == "localhost" || host == "127.0.0.1" || isPrivateIpv4(host)
+    }
+
+    private fun isTrustedPanelOrigin(): Boolean = isPanelUrl(web.url ?: "")
+
+    private fun isPrivateIpv4(host: String): Boolean {
+        if (!host.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) return false
+        val parts = host.split(".").map { it.toIntOrNull() ?: return false }
+        if (parts.any { it !in 0..255 }) return false
+        return parts[0] == 10 ||
+            (parts[0] == 192 && parts[1] == 168) ||
+            (parts[0] == 172 && parts[1] in 16..31)
+    }
+
+    /**
+     * Login credentials are encrypted using an Android Keystore AES/GCM key.
+     * They are never written to preferences in plaintext, and explicit logout clears them.
+     * Android's app sandbox/key lifetime means uninstall or app-data deletion removes them.
+     */
+    private inner class SessionVault(context: Context) {
+        private val prefs = context.getSharedPreferences("pterodactyl_encrypted_session", Context.MODE_PRIVATE)
+        private val alias = "pterodactyl_panel_session_v1"
+
+        @Synchronized
+        fun stage(username: String, password: String) {
+            try {
+                val encrypted = encrypt(JSONObject().put("username", username).put("password", password).toString())
+                prefs.edit().putString("pending_cipher", encrypted.first)
+                    .putString("pending_iv", encrypted.second).apply()
+            } catch (_: Exception) {
+                clearPending()
+            }
+        }
+
+        @Synchronized
+        fun promotePending() {
+            val cipherText = prefs.getString("pending_cipher", null) ?: return
+            val iv = prefs.getString("pending_iv", null) ?: return
+            prefs.edit().putString("saved_cipher", cipherText).putString("saved_iv", iv)
+                .remove("pending_cipher").remove("pending_iv").apply()
+        }
+
+        @Synchronized
+        fun clearPending() {
+            prefs.edit().remove("pending_cipher").remove("pending_iv").apply()
+        }
+
+        @Synchronized
+        fun loadSaved(): String? {
+            val cipherText = prefs.getString("saved_cipher", null) ?: return null
+            val iv = prefs.getString("saved_iv", null) ?: return null
+            return try {
+                decrypt(cipherText, iv)
+            } catch (_: Exception) {
+                clearAll()
+                null
+            }
+        }
+
+        @Synchronized
+        fun clearAll() {
+            prefs.edit().clear().apply()
+        }
+
+        private fun encrypt(value: String): Pair<String, String> {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+            val encrypted = cipher.doFinal(value.toByteArray(StandardCharsets.UTF_8))
+            return Base64.encodeToString(encrypted, Base64.NO_WRAP) to
+                Base64.encodeToString(cipher.iv, Base64.NO_WRAP)
+        }
+
+        private fun decrypt(cipherText: String, encodedIv: String): String {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val iv = Base64.decode(encodedIv, Base64.NO_WRAP)
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
+            val plain = cipher.doFinal(Base64.decode(cipherText, Base64.NO_WRAP))
+            return String(plain, StandardCharsets.UTF_8)
+        }
+
+        private fun getOrCreateKey(): SecretKey {
+            val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            val existing = store.getKey(alias, null)
+            if (existing is SecretKey) return existing
+            val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+            generator.init(
+                KeyGenParameterSpec.Builder(
+                    alias,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+                ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setRandomizedEncryptionRequired(true)
+                    .setKeySize(256)
+                    .build()
+            )
+            return generator.generateKey()
+        }
+    }
+
+    private fun installSessionHelper() {
+        val script = """
+            (function () {
+              try {
+                if (window.__pteroSessionHelperInstalled) return;
+                window.__pteroSessionHelperInstalled = true;
+                var nativeApp = window.PterodactylNative;
+                if (!nativeApp) return;
+
+                function getLoginForm() {
+                  var forms = Array.from(document.forms || []);
+                  for (var i = 0; i < forms.length; i++) {
+                    var f = forms[i];
+                    var p = f.querySelector('input[type="password"]');
+                    var u = f.querySelector('input[type="email"], input[autocomplete="username"], input[name="email"], input[name="username"], input[name="user"]');
+                    if (p && u) return { form: f, username: u, password: p };
+                  }
+                  return null;
+                }
+                function stage(formInfo) {
+                  if (!formInfo || !formInfo.username.value || !formInfo.password.value) return;
+                  try {
+                    nativeApp.stageLoginCredentials(JSON.stringify({
+                      username: formInfo.username.value,
+                      password: formInfo.password.value
+                    }));
+                  } catch (_) {}
+                }
+                function isLogoutElement(el) {
+                  if (!el || !el.closest) return false;
+                  var item = el.closest('a,button,[role="button"],input[type="submit"],form');
+                  if (!item) return false;
+                  var href = item.getAttribute('href') || '';
+                  var action = item.getAttribute('action') || (item.form && item.form.action) || '';
+                  var text = ((item.innerText || item.value || item.getAttribute('aria-label') || '') + '').trim();
+                  return /(^|[/_-])logout([/?#_-]|$)|sign[-_ ]?out|log[-_ ]?out/i.test(href + ' ' + action) ||
+                    /^(log\s*out|sign\s*out|keluar|logout|signout)$/i.test(text);
+                }
+                function clearForLogout() {
+                  try { nativeApp.clearLoginCredentials(); } catch (_) {}
+                }
+
+                document.addEventListener('submit', function (event) {
+                  var form = event.target;
+                  if (!form || !form.querySelector) return;
+                  var action = form.action || '';
+                  if (/logout|sign[-_]?out/i.test(action)) {
+                    clearForLogout();
+                    return;
+                  }
+                  var p = form.querySelector('input[type="password"]');
+                  var u = form.querySelector('input[type="email"], input[autocomplete="username"], input[name="email"], input[name="username"], input[name="user"]');
+                  if (p && u) stage({ form: form, username: u, password: p });
+                }, true);
+
+                document.addEventListener('click', function (event) {
+                  if (isLogoutElement(event.target)) {
+                    clearForLogout();
+                    return;
+                  }
+                  var formInfo = getLoginForm();
+                  if (formInfo && formInfo.form.contains(event.target)) {
+                    var submit = event.target.closest && event.target.closest('button,input[type="submit"],[role="button"]');
+                    if (submit) stage(formInfo);
+                  }
+                }, true);
+
+                // Also notice SPA-style logout requests initiated by fetch.
+                if (window.fetch && !window.__pteroFetchWrapped) {
+                  window.__pteroFetchWrapped = true;
+                  var originalFetch = window.fetch.bind(window);
+                  window.fetch = function (input, init) {
+                    var u = typeof input === 'string' ? input : (input && input.url) || '';
+                    if (/logout|sign[-_]?out/i.test(u)) clearForLogout();
+                    return originalFetch(input, init);
+                  };
+                }
+
+                var formInfo = getLoginForm();
+                if (formInfo && !window.__pteroAutologinTried) {
+                  window.__pteroAutologinTried = true;
+                  var saved = '';
+                  try { saved = nativeApp.getSavedLoginCredentials(); } catch (_) {}
+                  if (saved) {
+                    try {
+                      var credentials = JSON.parse(saved);
+                      if (credentials.username && credentials.password) {
+                        formInfo.username.value = credentials.username;
+                        formInfo.password.value = credentials.password;
+                        ['input', 'change'].forEach(function (name) {
+                          formInfo.username.dispatchEvent(new Event(name, { bubbles: true }));
+                          formInfo.password.dispatchEvent(new Event(name, { bubbles: true }));
+                        });
+                        setTimeout(function () {
+                          var latest = getLoginForm();
+                          if (!latest || !latest.username.value || !latest.password.value) return;
+                          stage(latest);
+                          if (latest.form.requestSubmit) latest.form.requestSubmit();
+                          else latest.form.submit();
+                        }, 400);
+                      }
+                    } catch (_) {}
+                  }
+                }
+
+                // If an SPA login succeeds without a full navigation, promote the staged secret
+                // once the password field disappears; a failed login leaves it pending only.
+                var observer = new MutationObserver(function () {
+                  if (!getLoginForm()) {
+                    try { nativeApp.promoteLoginCredentials(); } catch (_) {}
+                  }
+                });
+                observer.observe(document.documentElement, { childList: true, subtree: true });
+              } catch (_) {}
+            })();
+        """.trimIndent()
+        web.evaluateJavascript(script, null)
     }
 
     private fun openBestRoute(force: Boolean = false) {
@@ -399,6 +672,16 @@ class MainActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    override fun onPause() {
+        try { CookieManager.getInstance().flush() } catch (_: Exception) { }
+        super.onPause()
+    }
+
+    override fun onStop() {
+        try { CookieManager.getInstance().flush() } catch (_: Exception) { }
+        super.onStop()
     }
 
     override fun onResume() {
