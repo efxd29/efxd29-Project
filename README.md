@@ -1,38 +1,9 @@
-# Simple Mod (Fabric, MC 1.20.1)
+# Pterodactyl Android
 
-Mod client-side yang nampilin HUD custom di atas hotbar:
-- Koordinat X/Y/Z (label putih, angka ijo) + ikon pin lokasi merah
-- Day counter (cyan) + ikon jam biru
+Private-use Android APK for the panel at https://pemai.net. Built through GitHub Actions; no Termux build step and no server/panel files are modified.
 
-Posisinya dihitung relatif ke hotbar (bukan koordinat mati), jadi tetep pas biar di resolusi/GUI scale berapa pun. Ikonnya diambil dari resource pack Bedrock "Better Coord And Days" yang lu kasih, terus dipotong jadi texture PNG buat dipake di Java.
-
-Semua ini murni visual overlay (HudRenderCallback) — gak ngubah gameplay apa pun, aman dipake di server manapun karena cuma jalan di client.
-
-## Build tanpa PC (via GitHub Actions)
-
-1. Bikin repo baru di GitHub (bisa lewat browser HP), upload semua isi folder ini ke situ.
-2. GitHub bakal otomatis jalanin workflow di `.github/workflows/build.yml` begitu file ke-push.
-3. Buka tab **Actions** di repo → klik run yang lagi jalan/udah selesai → scroll ke bagian **Artifacts** → download `simplemod-jar`.
-4. Extract zip artifact itu, di dalemnya ada file `.jar` — itu yang ditaro di folder `mods` Minecraft (perlu Fabric Loader + Fabric API juga kepasang di game).
-
-## Build di PC (kalau ada)
-
-1. Extract folder ini, terus buka pakai IntelliJ IDEA (paling gampang) — pilih "Open" ke folder ini, IntelliJ bakal otomatis detect Gradle project.
-2. Kalau belum ada Gradle Wrapper (`gradlew` / `gradlew.bat`), generate dulu:
-   - Buka terminal di folder ini
-   - Jalanin `gradle wrapper --gradle-version 8.8` (butuh Gradle terinstall sekali aja, abis itu wrapper-nya kepake terus)
-3. Setelah wrapper ada, jalanin `./gradlew genSources` (opsional, biar bisa liat source Minecraft) lalu `./gradlew build`.
-4. Buat testing langsung, jalanin `./gradlew runClient`.
-
-## Struktur
-
-- `src/main/java/...` — kode yang jalan di server & client
-- `src/client/java/...` — kode yang cuma jalan di client (render, keybind, dll)
-- `src/main/resources/fabric.mod.json` — metadata mod (nama, id, dependency)
-- `gradle.properties` — versi Minecraft, Yarn mappings, Fabric Loader, Fabric API
-
-## Ganti identitas mod
-
-Ganti semua `simplemod` / `com.example.simplemod` sesuai nama mod lu, terus update `mod_id`, `name`, `description` di `fabric.mod.json`.
-
-Cek versi Fabric terbaru di https://fabricmc.net/develop kalau mau update dependency.
+- On Wi-Fi, the app searches the current private IPv4 subnet for a page identified as Pterodactyl on ports 8080, 80, or 8081. If none is identified, it falls back to https://pemai.net.
+- On cellular or other non-Wi-Fi networks, it uses https://pemai.net.
+- Native diagnostics report observable network, DNS, HTTP, TLS, and WebView failures. An inaccessible client cannot reliably prove whether an internal server watchdog or Android process is stopped without an exposed status endpoint.
+- The installable APK contains a native Android Activity, file picker, download manager, and diagnostic screen. The panel content itself is displayed in WebView to preserve the existing responsive Pterodactyl mobile UI and its session/features; this is not a browser shortcut or PWA.
+- TLS errors are never bypassed. APK artifact name: `Pterodactyl-Android-Debug`.
