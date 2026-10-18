@@ -62,6 +62,7 @@ class MainActivity : Activity() {
     private var lastError = ""
 
     private val sessionVault by lazy { SessionVault(applicationContext) }
+    private val autoLoginAttemptedHosts = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private fun dp(v: Int) = (v * resources.displayMetrics.density + 0.5f).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -428,8 +429,24 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
+        fun beginAutoLogin(): Boolean {
+            if (!isTrustedPanelOrigin()) return false
+            val host = try { Uri.parse(web.url ?: "").host?.lowercase() } catch (_: Exception) { null } ?: return false
+            return autoLoginAttemptedHosts.add(host)
+        }
+
+        @JavascriptInterface
         fun clearLoginCredentials() {
-            if (isTrustedPanelOrigin()) sessionVault.clearAll()
+            if (!isTrustedPanelOrigin()) return
+            sessionVault.clearAll()
+            // Let the current logout POST carry its existing session cookie first.
+            runOnUiThread {
+                web.postDelayed({
+                    CookieManager.getInstance().removeAllCookies {
+                        CookieManager.getInstance().flush()
+                    }
+                }, 1500L)
+            }
         }
     }
 
@@ -478,6 +495,7 @@ class MainActivity : Activity() {
             val iv = prefs.getString("pending_iv", null) ?: return
             prefs.edit().putString("saved_cipher", cipherText).putString("saved_iv", iv)
                 .remove("pending_cipher").remove("pending_iv").apply()
+            autoLoginAttemptedHosts.clear()
         }
 
         @Synchronized
@@ -500,6 +518,7 @@ class MainActivity : Activity() {
         @Synchronized
         fun clearAll() {
             prefs.edit().clear().apply()
+            autoLoginAttemptedHosts.clear()
         }
 
         private fun encrypt(value: String): Pair<String, String> {
@@ -619,8 +638,12 @@ class MainActivity : Activity() {
                 if (formInfo && !window.__pteroAutologinTried) {
                   window.__pteroAutologinTried = true;
                   var saved = '';
-                  try { saved = nativeApp.getSavedLoginCredentials(); } catch (_) {}
-                  if (saved) {
+                  var allowedAttempt = false;
+                  try {
+                    saved = nativeApp.getSavedLoginCredentials();
+                    if (saved) allowedAttempt = nativeApp.beginAutoLogin();
+                  } catch (_) {}
+                  if (saved && allowedAttempt) {
                     try {
                       var credentials = JSON.parse(saved);
                       if (credentials.username && credentials.password) {
