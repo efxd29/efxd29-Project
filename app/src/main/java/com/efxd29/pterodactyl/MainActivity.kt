@@ -8,6 +8,14 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.view.animation.LinearInterpolator
+import android.os.Message
+import android.os.Looper
+import android.os.Handler
+import android.graphics.RectF
+import android.graphics.Paint
+import android.graphics.Canvas
+import android.animation.ValueAnimator
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -62,6 +70,9 @@ class MainActivity : Activity() {
     private var reportText: TextView? = null
     private var diagnosing = false
     private var lastError = ""
+    private val failedMainFrameUrls = mutableSetOf<String>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var initialLoadTimeout: Runnable? = null
     @Volatile private var lastConsoleRecoveryAtMs = 0L
     @Volatile private var hideNextProgress = false
 
@@ -98,8 +109,8 @@ class MainActivity : Activity() {
             domStorageEnabled = true
             databaseEnabled = true
             loadsImagesAutomatically = true
-            javaScriptCanOpenWindowsAutomatically = false
-            setSupportMultipleWindows(false)
+            javaScriptCanOpenWindowsAutomatically = true
+            setSupportMultipleWindows(true)
             allowFileAccess = false
             allowContentAccess = true
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
@@ -115,32 +126,14 @@ class MainActivity : Activity() {
         web.addJavascriptInterface(NativeBridge(), "PterodactylNative")
 
         web.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
-                val u = r.url
-                if (u.scheme != "http" && u.scheme != "https") {
-                    return try { startActivity(Intent(Intent.ACTION_VIEW, u)); true } catch (_: Exception) { true }
-                }
-                val currentHost = try { Uri.parse(route.url).host } catch (_: Exception) { null }
-                val isPanelHost = u.host.equals(currentHost, true) ||
-                    u.host.equals("pemai.net", true) || u.host.equals("www.pemai.net", true)
-                if (isPanelHost) {
-                    val localMode = route.via.contains("lokal", true) || route.via.contains("Wi-Fi", true)
-                    if (localMode && (u.host.equals("pemai.net", true) || u.host.equals("www.pemai.net", true))) {
-                        val local = Uri.parse(route.url)
-                        val port = if (local.port > 0) ":" + local.port else ""
-                        val authority = (local.host ?: return false) + port
-                        val mapped = Uri.Builder().scheme(local.scheme).encodedAuthority(authority)
-                            .encodedPath(u.encodedPath ?: "/").encodedQuery(u.encodedQuery)
-                            .encodedFragment(u.encodedFragment).build()
-                        v.loadUrl(mapped.toString())
-                        return true
-                    }
-                    return false
-                }
-                return try { startActivity(Intent(Intent.ACTION_VIEW, u)); true } catch (_: Exception) { true }
-            }
+            override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean =
+                handlePanelNavigation(r.url, v)
 
             override fun onPageStarted(v: WebView, url: String?, icon: android.graphics.Bitmap?) {
+                if (!url.isNullOrBlank()) {
+                    failedMainFrameUrls.remove(url)
+                    scheduleInitialLoadTimeout(url)
+                }
                 if (!hasLoadedPage && loadingOverlay != null) {
                     progress.visibility = View.GONE
                 } else if (hideNextProgress) {
@@ -152,20 +145,19 @@ class MainActivity : Activity() {
             }
 
             override fun onPageFinished(v: WebView, url: String?) {
+                if (url.isNullOrBlank()) return
+                if (failedMainFrameUrls.remove(url)) return
+                // Ignore late completion callbacks for a failed route after fallback already started.
+                if (!isExpectedPanelUrl(url)) return
+                cancelInitialLoadTimeout()
                 progress.visibility = View.GONE
                 CookieManager.getInstance().flush()
-                if (!url.isNullOrBlank()) {
-                    hasLoadedPage = true
-                    hideLoadingOverlay()
-                }
-                if (reportPage != null && !url.isNullOrBlank()) hideReport()
-                if (!url.isNullOrBlank() && isPanelUrl(url)) {
+                hasLoadedPage = true
+                hideLoadingOverlay()
+                if (reportPage != null) hideReport()
+                if (isPanelUrl(url)) {
                     installSessionHelper()
-                    if (isServerConsoleUrl(url)) {
-                        installConsoleRecovery()
-                    } else {
-                        installLiveUpdateMonitor()
-                    }
+                    if (isServerConsoleUrl(url)) installConsoleRecovery() else installLiveUpdateMonitor()
                     web.evaluateJavascript("!!document.querySelector('input[type=password]')") { result ->
                         if (!isFinishing && !isDestroyed && isPanelUrl(url)) {
                             if (result == "false") sessionVault.promotePending()
@@ -176,23 +168,35 @@ class MainActivity : Activity() {
             }
 
             override fun onReceivedError(v: WebView, request: WebResourceRequest, error: WebResourceError) {
-                super.onReceivedError(v, request, error)
-                if (request.isForMainFrame) {
-                    if (isLocalRoute() && !isCloudRoute()) {
-                        fallbackToCloudflare("Alamat panel lokal tidak merespons (" + error.errorCode + ").")
-                    } else {
-                        hideLoadingOverlay()
-                        showFailure("Panel tidak bisa dijangkau", "WebView " + error.errorCode + ": " + error.description)
-                    }
+                if (!request.isForMainFrame) {
+                    super.onReceivedError(v, request, error)
+                    return
+                }
+                val failedUrl = request.url.toString()
+                failedMainFrameUrls.add(failedUrl)
+                if (!isExpectedPanelUrl(failedUrl)) return
+                // Keep Chromium's built-in "Web page not available" document behind the app spinner/report.
+                if (isLocalRoute() && !isCloudRoute()) {
+                    fallbackToCloudflare("Alamat panel lokal tidak merespons (" + error.errorCode + ").")
+                } else {
+                    cancelInitialLoadTimeout()
+                    hideLoadingOverlay()
+                    showFailure("Panel tidak bisa dijangkau", "WebView " + error.errorCode + ": " + error.description)
                 }
             }
 
             override fun onReceivedHttpError(v: WebView, request: WebResourceRequest, response: WebResourceResponse) {
-                super.onReceivedHttpError(v, request, response)
-                if (request.isForMainFrame && response.statusCode >= 400) {
+                if (!request.isForMainFrame || !isExpectedPanelUrl(request.url.toString())) {
+                    super.onReceivedHttpError(v, request, response)
+                    return
+                }
+                // A 401/403/404 can be a valid panel page (notably /admin); don't treat these as a dead route.
+                if (response.statusCode >= 500) {
+                    failedMainFrameUrls.add(request.url.toString())
                     if (isLocalRoute() && !isCloudRoute()) {
                         fallbackToCloudflare("Panel lokal membalas HTTP " + response.statusCode + ".")
-                    } else if (response.statusCode >= 500) {
+                    } else if (!hasLoadedPage) {
+                        cancelInitialLoadTimeout()
                         hideLoadingOverlay()
                         showFailure("Panel membalas HTTP " + response.statusCode,
                             "HTTP " + response.statusCode + " " + (response.reasonPhrase ?: ""))
@@ -226,6 +230,32 @@ class MainActivity : Activity() {
                     Toast.makeText(this@MainActivity, "Pemilih file tidak tersedia.", Toast.LENGTH_LONG).show()
                     false
                 }
+            }
+
+            override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
+                val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                val popup = WebView(this@MainActivity)
+                popup.settings.javaScriptEnabled = true
+                popup.settings.domStorageEnabled = true
+                popup.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(v: WebView, request: WebResourceRequest): Boolean {
+                        openPanelTargetInMain(request.url)
+                        v.stopLoading()
+                        v.post { v.destroy() }
+                        return true
+                    }
+
+                    override fun onPageStarted(v: WebView, url: String?, icon: android.graphics.Bitmap?) {
+                        if (!url.isNullOrBlank() && url != "about:blank") {
+                            openPanelTargetInMain(Uri.parse(url))
+                            v.stopLoading()
+                            v.post { v.destroy() }
+                        }
+                    }
+                }
+                transport.webView = popup
+                resultMsg?.sendToTarget()
+                return true
             }
         }
 
@@ -866,16 +896,100 @@ class MainActivity : Activity() {
 
     private fun isCloudRoute(): Boolean = route.url.startsWith("https://pemai.net", true)
 
+    private fun isExpectedPanelUrl(value: String): Boolean {
+        val target = try { Uri.parse(value) } catch (_: Exception) { return false }
+        val active = try { Uri.parse(route.url) } catch (_: Exception) { return false }
+        val host = target.host?.lowercase() ?: return false
+        val expected = active.host?.lowercase() ?: return false
+        if (host == expected) return true
+        if (isCloudRoute()) return host == "pemai.net" || host == "www.pemai.net"
+        if (isLocalRoute()) return host == "127.0.0.1" || host == "localhost"
+        return false
+    }
+
+    private fun isKnownPanelHost(host: String): Boolean {
+        val h = host.lowercase()
+        return h == "pemai.net" || h == "www.pemai.net" ||
+            h == "127.0.0.1" || h == "localhost" || isPrivateIpv4(h)
+    }
+
+    private fun handlePanelNavigation(target: Uri, source: WebView): Boolean {
+        if (target.scheme != "http" && target.scheme != "https") {
+            return try { startActivity(Intent(Intent.ACTION_VIEW, target)); true } catch (_: Exception) { true }
+        }
+        val current = try { Uri.parse(web.url ?: route.url) } catch (_: Exception) { Uri.parse(route.url) }
+        val targetHost = target.host ?: return true
+        val sameOrigin = targetHost.equals(current.host, true) &&
+            (target.port == current.port || target.port == -1 || current.port == -1) &&
+            target.scheme.equals(current.scheme, true)
+        if (sameOrigin) return false
+        if (isKnownPanelHost(targetHost)) {
+            val mapped = Uri.Builder().scheme(current.scheme ?: "https")
+                .encodedAuthority(current.encodedAuthority ?: return true)
+                .encodedPath(target.encodedPath?.takeIf { it.isNotEmpty() } ?: "/")
+                .encodedQuery(target.encodedQuery)
+                .encodedFragment(target.encodedFragment).build()
+            source.loadUrl(mapped.toString())
+            return true
+        }
+        return try { startActivity(Intent(Intent.ACTION_VIEW, target)); true } catch (_: Exception) { true }
+    }
+
+    private fun openPanelTargetInMain(target: Uri) {
+        val current = try { Uri.parse(web.url ?: route.url) } catch (_: Exception) { Uri.parse(route.url) }
+        val host = target.host ?: return
+        val mapped = if (isKnownPanelHost(host)) {
+            Uri.Builder().scheme(current.scheme ?: "https")
+                .encodedAuthority(current.encodedAuthority ?: return)
+                .encodedPath(target.encodedPath?.takeIf { it.isNotEmpty() } ?: "/")
+                .encodedQuery(target.encodedQuery)
+                .encodedFragment(target.encodedFragment).build()
+        } else target
+        if (isKnownPanelHost(host)) {
+            web.loadUrl(mapped.toString())
+        } else {
+            try { startActivity(Intent(Intent.ACTION_VIEW, mapped)) } catch (_: Exception) { }
+        }
+    }
+
+    private fun scheduleInitialLoadTimeout(url: String) {
+        if (hasLoadedPage) return
+        cancelInitialLoadTimeout()
+        val timeoutMs = if (isLocalRoute() && !isCloudRoute()) 2500L else 15000L
+        val task = Runnable {
+            if (!hasLoadedPage && isExpectedPanelUrl(url)) {
+                if (isLocalRoute() && !isCloudRoute()) {
+                    fallbackToCloudflare("Panel lokal belum merespons dalam ${timeoutMs} ms.")
+                } else {
+                    hideLoadingOverlay()
+                    showFailure("Panel lambat merespons", "Tidak ada halaman selesai dimuat dalam ${timeoutMs} ms. Periksa koneksi internet/domain panel.")
+                }
+            }
+        }
+        initialLoadTimeout = task
+        mainHandler.postDelayed(task, timeoutMs)
+    }
+
+    private fun cancelInitialLoadTimeout() {
+        initialLoadTimeout?.let { mainHandler.removeCallbacks(it) }
+        initialLoadTimeout = null
+    }
+
     private fun fallbackToCloudflare(reason: String) {
         if (isFinishing || isDestroyed || isCloudRoute()) {
+            cancelInitialLoadTimeout()
             hideLoadingOverlay()
             showFailure("Panel tidak bisa dijangkau", reason)
             return
         }
+        failedMainFrameUrls.add(web.url ?: route.url)
         route = RouteDecision(PanelDiscovery.CLOUD, "Cloudflare fallback")
         if (!hasLoadedPage) showLoadingOverlay()
         progress.visibility = View.GONE
+        cancelInitialLoadTimeout()
+        web.stopLoading()
         web.loadUrl(route.url)
+        scheduleInitialLoadTimeout(route.url)
     }
 
     private fun showLoadingOverlay() {
@@ -897,18 +1011,17 @@ class MainActivity : Activity() {
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
         }
-        val spinner = ProgressBar(this).apply {
-            isIndeterminate = true
-            indeterminateTintList = android.content.res.ColorStateList.valueOf(0xFF4F8CFF.toInt())
+        val spinner = PterodactylSpinnerView(this).apply {
+            contentDescription = "Memuat panel Pterodactyl"
         }
         val message = TextView(this).apply {
             text = "Menghubungkan ke panel…"
             textSize = 14f
-            setTextColor(0xFFCAD2DA.toInt())
+            setTextColor(0xFF8D9BAA.toInt())
             gravity = Gravity.CENTER
         }
-        center.addView(title, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(22) })
-        center.addView(spinner, LinearLayout.LayoutParams(dp(36), dp(36)).apply { gravity = Gravity.CENTER; bottomMargin = dp(16) })
+        center.addView(title, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(28) })
+        center.addView(spinner, LinearLayout.LayoutParams(dp(104), dp(104)).apply { gravity = Gravity.CENTER; bottomMargin = dp(20) })
         center.addView(message, LinearLayout.LayoutParams(-1, -2))
         layer.addView(center, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
         root.addView(layer, FrameLayout.LayoutParams(-1, -1))
@@ -1084,6 +1197,63 @@ class MainActivity : Activity() {
         val fromUrl = try { Uri.parse(url).lastPathSegment } catch (_: Exception) { null }
         return (fromHeader ?: fromUrl ?: "pterodactyl-download")
             .substringAfterLast('/').replace(Regex("[^A-Za-z0-9._ -]"), "_").take(100)
+    }
+
+    private inner class PterodactylSpinnerView(context: Context) : View(context) {
+        private val track = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.BUTT
+            strokeWidth = dp(9).toFloat()
+            color = 0xFF5B6875.toInt()
+        }
+        private val arc = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.BUTT
+            strokeWidth = dp(9).toFloat()
+            color = Color.WHITE
+        }
+        private val bounds = RectF()
+        private var angle = 0f
+        private var animator: ValueAnimator? = null
+
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            animator?.cancel()
+            animator = ValueAnimator.ofFloat(0f, 360f).apply {
+                duration = 900L
+                repeatCount = ValueAnimator.INFINITE
+                interpolator = LinearInterpolator()
+                addUpdateListener {
+                    angle = it.animatedValue as Float
+                    invalidate()
+                }
+                start()
+            }
+        }
+
+        override fun onDetachedFromWindow() {
+            animator?.cancel()
+            animator = null
+            super.onDetachedFromWindow()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val stroke = track.strokeWidth
+            val diameter = minOf(width, height).toFloat()
+            val inset = stroke / 2f + dp(1)
+            bounds.set(
+                (width - diameter) / 2f + inset,
+                (height - diameter) / 2f + inset,
+                (width + diameter) / 2f - inset,
+                (height + diameter) / 2f - inset
+            )
+            canvas.drawArc(bounds, 0f, 360f, false, track)
+            canvas.save()
+            canvas.rotate(angle, width / 2f, height / 2f)
+            canvas.drawArc(bounds, -72f, 78f, false, arc)
+            canvas.restore()
+        }
     }
 
     companion object {
