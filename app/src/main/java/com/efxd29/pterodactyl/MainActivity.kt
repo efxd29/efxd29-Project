@@ -53,6 +53,8 @@ class MainActivity : Activity() {
     private lateinit var web: WebView
     private lateinit var progress: ProgressBar
     private lateinit var root: FrameLayout
+    private var loadingOverlay: View? = null
+    private var hasLoadedPage = false
     private var route = RouteDecision(PanelDiscovery.CLOUD, "Cloudflare")
     private var signature = ""
     private var pending: ValueCallback<Array<Uri>>? = null
@@ -70,14 +72,19 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = Color.rgb(16, 17, 20)
         window.navigationBarColor = Color.rgb(16, 17, 20)
-        root = FrameLayout(this).apply { setBackgroundColor(Color.rgb(16, 17, 20)) }
-        web = WebView(this)
+        root = FrameLayout(this).apply { setBackgroundColor(PANEL_BODY_COLOR) }
+        web = WebView(this).apply {
+            setBackgroundColor(PANEL_BODY_COLOR)
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             isIndeterminate = true
             indeterminateTintList = android.content.res.ColorStateList.valueOf(Color.rgb(79, 140, 255))
+            visibility = View.GONE
         }
         root.addView(web, FrameLayout.LayoutParams(-1, -1))
         root.addView(progress, FrameLayout.LayoutParams(-1, dp(3), Gravity.TOP))
+        showLoadingOverlay()
         setContentView(root)
         configureWeb()
         signature = PanelDiscovery.networkSignature(this)
@@ -133,7 +140,9 @@ class MainActivity : Activity() {
             }
 
             override fun onPageStarted(v: WebView, url: String?, icon: android.graphics.Bitmap?) {
-                if (hideNextProgress) {
+                if (!hasLoadedPage && loadingOverlay != null) {
+                    progress.visibility = View.GONE
+                } else if (hideNextProgress) {
                     hideNextProgress = false
                     progress.visibility = View.GONE
                 } else {
@@ -144,12 +153,14 @@ class MainActivity : Activity() {
             override fun onPageFinished(v: WebView, url: String?) {
                 progress.visibility = View.GONE
                 CookieManager.getInstance().flush()
+                if (!url.isNullOrBlank()) {
+                    hasLoadedPage = true
+                    hideLoadingOverlay()
+                }
                 if (reportPage != null && !url.isNullOrBlank()) hideReport()
                 if (!url.isNullOrBlank() && isPanelUrl(url)) {
                     installSessionHelper()
                     installLiveUpdateMonitor()
-                    // Promote staged credentials only after the login form disappears,
-                    // which means the panel accepted the login and navigated successfully.
                     web.evaluateJavascript("!!document.querySelector('input[type=password]')") { result ->
                         if (!isFinishing && !isDestroyed && isPanelUrl(url)) {
                             if (result == "false") sessionVault.promotePending()
@@ -162,15 +173,25 @@ class MainActivity : Activity() {
             override fun onReceivedError(v: WebView, request: WebResourceRequest, error: WebResourceError) {
                 super.onReceivedError(v, request, error)
                 if (request.isForMainFrame) {
-                    showFailure("Panel tidak bisa dijangkau", "WebView " + error.errorCode + ": " + error.description)
+                    if (isLocalRoute() && !isCloudRoute()) {
+                        fallbackToCloudflare("Alamat panel lokal tidak merespons (" + error.errorCode + ").")
+                    } else {
+                        hideLoadingOverlay()
+                        showFailure("Panel tidak bisa dijangkau", "WebView " + error.errorCode + ": " + error.description)
+                    }
                 }
             }
 
             override fun onReceivedHttpError(v: WebView, request: WebResourceRequest, response: WebResourceResponse) {
                 super.onReceivedHttpError(v, request, response)
-                if (request.isForMainFrame && response.statusCode >= 500) {
-                    showFailure("Panel membalas HTTP " + response.statusCode,
-                        "HTTP " + response.statusCode + " " + (response.reasonPhrase ?: ""))
+                if (request.isForMainFrame && response.statusCode >= 400) {
+                    if (isLocalRoute() && !isCloudRoute()) {
+                        fallbackToCloudflare("Panel lokal membalas HTTP " + response.statusCode + ".")
+                    } else if (response.statusCode >= 500) {
+                        hideLoadingOverlay()
+                        showFailure("Panel membalas HTTP " + response.statusCode,
+                            "HTTP " + response.statusCode + " " + (response.reasonPhrase ?: ""))
+                    }
                 }
             }
 
@@ -714,20 +735,79 @@ class MainActivity : Activity() {
 
     private fun openBestRoute(force: Boolean = false) {
         signature = PanelDiscovery.networkSignature(this)
-        progress.visibility = View.VISIBLE
         hideReport()
-        Thread {
-            val decision = PanelDiscovery.choose(this)
-            runOnUiThread {
-                route = decision
-                val current = web.url
-                if (force || current.isNullOrBlank() || !current.startsWith(route.url) || reportPage != null) {
-                    web.loadUrl(route.url)
-                } else {
-                    progress.visibility = View.GONE
-                }
-            }
-        }.start()
+        val previousUrl = web.url
+        val decision = PanelDiscovery.choose(this)
+        val routeChanged = previousUrl.isNullOrBlank() || !previousUrl.startsWith(decision.url)
+        route = decision
+
+        // Route selection contains no DNS, HTTP or IP scan; load the chosen endpoint immediately.
+        if (force || routeChanged) {
+            if (!hasLoadedPage) showLoadingOverlay()
+            progress.visibility = if (hasLoadedPage) View.VISIBLE else View.GONE
+            web.loadUrl(decision.url)
+        } else {
+            progress.visibility = View.GONE
+        }
+    }
+
+    private fun isLocalRoute(): Boolean =
+        route.via.contains("lokal", true) || route.via.contains("Wi-Fi", true)
+
+    private fun isCloudRoute(): Boolean = route.url.startsWith("https://pemai.net", true)
+
+    private fun fallbackToCloudflare(reason: String) {
+        if (isFinishing || isDestroyed || isCloudRoute()) {
+            hideLoadingOverlay()
+            showFailure("Panel tidak bisa dijangkau", reason)
+            return
+        }
+        route = RouteDecision(PanelDiscovery.CLOUD, "Cloudflare fallback")
+        if (!hasLoadedPage) showLoadingOverlay()
+        progress.visibility = View.GONE
+        web.loadUrl(route.url)
+    }
+
+    private fun showLoadingOverlay() {
+        if (loadingOverlay != null || !::root.isInitialized) return
+        val layer = FrameLayout(this).apply {
+            setBackgroundColor(PANEL_BODY_COLOR)
+            isClickable = true
+            isFocusable = true
+        }
+        val center = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(28), dp(20), dp(28), dp(20))
+        }
+        val title = TextView(this).apply {
+            text = "Pterodactyl"
+            textSize = 25f
+            setTextColor(0xFFD0D7DE.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        val spinner = ProgressBar(this).apply {
+            isIndeterminate = true
+            indeterminateTintList = android.content.res.ColorStateList.valueOf(0xFF4F8CFF.toInt())
+        }
+        val message = TextView(this).apply {
+            text = "Menghubungkan ke panel…"
+            textSize = 14f
+            setTextColor(0xFFCAD2DA.toInt())
+            gravity = Gravity.CENTER
+        }
+        center.addView(title, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(22) })
+        center.addView(spinner, LinearLayout.LayoutParams(dp(36), dp(36)).apply { gravity = Gravity.CENTER; bottomMargin = dp(16) })
+        center.addView(message, LinearLayout.LayoutParams(-1, -2))
+        layer.addView(center, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+        root.addView(layer, FrameLayout.LayoutParams(-1, -1))
+        loadingOverlay = layer
+    }
+
+    private fun hideLoadingOverlay() {
+        loadingOverlay?.let { root.removeView(it) }
+        loadingOverlay = null
     }
 
     override fun onPause() {
@@ -744,7 +824,7 @@ class MainActivity : Activity() {
         super.onResume()
         if (::web.isInitialized) {
             val now = PanelDiscovery.networkSignature(this)
-            if (now != signature) openBestRoute(true)
+            if (now != signature) openBestRoute(false)
         }
     }
 
@@ -769,6 +849,7 @@ class MainActivity : Activity() {
     private fun showFailure(title: String, trigger: String) {
         runOnUiThread {
             lastError = trigger
+            hideLoadingOverlay()
             progress.visibility = View.GONE
             web.visibility = View.GONE
             var page = reportPage
@@ -897,5 +978,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val FILE_PICKER_REQUEST = 3018
+        private const val PANEL_BODY_COLOR = 0xFF33414F.toInt()
     }
 }
