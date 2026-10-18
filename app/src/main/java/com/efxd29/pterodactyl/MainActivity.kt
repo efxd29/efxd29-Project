@@ -90,6 +90,8 @@ class MainActivity : Activity() {
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
 
+        web.addJavascriptInterface(NativeBridge(), "PterodactylNative")
+
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
                 val u = r.url
@@ -123,6 +125,10 @@ class MainActivity : Activity() {
             override fun onPageFinished(v: WebView, url: String?) {
                 progress.visibility = View.GONE
                 if (reportPage != null && !url.isNullOrBlank()) hideReport()
+                // Poll only from inside this app; no website/server modification is required.
+                if (!url.isNullOrBlank() && (url.contains("pemai.net", true) || url.contains("127.0.0.1") || url.contains("192.168.") || url.contains("10.") || url.contains("172."))) {
+                    installLiveUpdateMonitor()
+                }
             }
 
             override fun onReceivedError(v: WebView, request: WebResourceRequest, error: WebResourceError) {
@@ -189,6 +195,190 @@ class MainActivity : Activity() {
                 Toast.makeText(this, "Download gagal: " + (e.message ?: "error"), Toast.LENGTH_LONG).show()
             }
         })
+    }
+
+    /**
+     * Detects changed server-rendered HTML and changed JavaScript/CSS asset versions.
+     * All polling is native-app WebView code. It never writes to the panel or server.
+     */
+    private fun installLiveUpdateMonitor() {
+        val script = """
+            (function () {
+              try {
+                if (window.__pteroLiveUpdateTimer) clearInterval(window.__pteroLiveUpdateTimer);
+                var observedUrl = location.href;
+                var baseline = null;
+                var running = false;
+                var updateWaiting = false;
+
+                function digest(value) {
+                  var hash = 2166136261;
+                  for (var i = 0; i < value.length; i++) {
+                    hash ^= value.charCodeAt(i);
+                    hash = Math.imul(hash, 16777619);
+                  }
+                  return (hash >>> 0).toString(16);
+                }
+
+                function normalize(html) {
+                  var doc = new DOMParser().parseFromString(html, 'text/html');
+                  doc.querySelectorAll('meta[name*="csrf" i], meta[name*="xsrf" i]').forEach(function (n) { n.remove(); });
+                  doc.querySelectorAll('input[type="hidden"]').forEach(function (n) {
+                    if (/csrf|_token|xsrf/i.test((n.name || '') + ' ' + (n.id || ''))) n.remove();
+                  });
+                  doc.querySelectorAll('[nonce]').forEach(function (n) { n.removeAttribute('nonce'); });
+                  return doc.documentElement.outerHTML
+                    .replace(/(csrf[-_]?token|_token|xsrf[-_]?token)(["']?\s*[:=]\s*["'])[^"']+/gi, '$1$2TOKEN')
+                    .replace(/>\s+</g, '><')
+                    .replace(/\s+/g, ' ');
+                }
+
+                async function assetState(doc) {
+                  var nodes = Array.from(doc.querySelectorAll('script[src], link[rel~="stylesheet"][href]'));
+                  var urls = Array.from(new Set(nodes.map(function (n) { return n.src || n.href; }))).filter(function (u) {
+                    try { return new URL(u, location.href).origin === location.origin; } catch (_) { return false; }
+                  });
+                  var parts = await Promise.all(urls.map(async function (u) {
+                    try {
+                      var r = await fetch(u, {
+                        method: 'HEAD',
+                        cache: 'no-store',
+                        credentials: 'include',
+                        headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }
+                      });
+                      var value = [
+                        u,
+                        r.status,
+                        r.headers.get('ETag') || '',
+                        r.headers.get('Last-Modified') || '',
+                        r.headers.get('Content-Length') || ''
+                      ].join('|');
+                      return value;
+                    } catch (_) { return u + '|unavailable'; }
+                  }));
+                  return parts.sort().join('\n');
+                }
+
+                async function getSignature() {
+                  var requestUrl = location.href;
+                  var response = await fetch(requestUrl, {
+                    method: 'GET',
+                    cache: 'no-store',
+                    credentials: 'include',
+                    headers: {
+                      'Cache-Control': 'no-cache',
+                      'Pragma': 'no-cache',
+                      'X-Requested-With': 'Pterodactyl-Android-Live-Check'
+                    }
+                  });
+                  if (!response.ok || !/text\/html/i.test(response.headers.get('Content-Type') || '')) return null;
+                  try {
+                    if (new URL(response.url).pathname !== new URL(requestUrl).pathname) return null;
+                  } catch (_) { return null; }
+                  var html = await response.text();
+                  var doc = new DOMParser().parseFromString(html, 'text/html');
+                  var stableHtml = normalize(html);
+                  var assets = await assetState(doc);
+                  return digest(stableHtml + '\n--assets--\n' + assets);
+                }
+
+                function isEditing() {
+                  var active = document.activeElement;
+                  if (!active) return false;
+                  if (active.matches && active.matches('input:not([type="hidden"]), textarea, [contenteditable="true"], [role="textbox"]')) {
+                    return true;
+                  }
+                  if (active.closest && active.closest('.xterm, .xterm-screen, [data-ptero-console]')) return true;
+                  return false;
+                }
+
+                function showUpdateBanner() {
+                  if (document.getElementById('ptero-app-update-banner')) return;
+                  var banner = document.createElement('div');
+                  banner.id = 'ptero-app-update-banner';
+                  banner.setAttribute('role', 'status');
+                  banner.style.cssText = 'position:fixed;z-index:2147483647;top:8px;left:12px;right:12px;padding:12px 14px;border-radius:12px;background:#202733;color:#fff;box-shadow:0 4px 20px #0008;font:14px sans-serif;display:flex;align-items:center;gap:12px;';
+                  var text = document.createElement('span');
+                  text.textContent = 'Perubahan panel tersedia. Muat versi baru?';
+                  text.style.cssText = 'flex:1;line-height:1.35;';
+                  var button = document.createElement('button');
+                  button.type = 'button';
+                  button.textContent = 'Muat';
+                  button.style.cssText = 'border:0;border-radius:8px;padding:8px 12px;background:#477fe5;color:white;font-weight:600;';
+                  button.addEventListener('click', function () {
+                    if (window.PterodactylNative && window.PterodactylNative.applyUpdate) {
+                      window.PterodactylNative.applyUpdate();
+                    } else {
+                      location.reload();
+                    }
+                  });
+                  banner.appendChild(text);
+                  banner.appendChild(button);
+                  document.documentElement.appendChild(banner);
+                }
+
+                async function poll() {
+                  if (running || document.visibilityState !== 'visible') return;
+                  if (location.href !== observedUrl) {
+                    observedUrl = location.href;
+                    baseline = null;
+                    updateWaiting = false;
+                    var oldBanner = document.getElementById('ptero-app-update-banner');
+                    if (oldBanner) oldBanner.remove();
+                    return;
+                  }
+                  running = true;
+                  try {
+                    var next = await getSignature();
+                    if (next === null) return;
+                    if (baseline === null) {
+                      baseline = next;
+                      return;
+                    }
+                    if (next !== baseline) {
+                      baseline = next;
+                      updateWaiting = true;
+                      if (isEditing()) {
+                        showUpdateBanner();
+                      } else if (window.PterodactylNative && window.PterodactylNative.applyUpdate) {
+                        window.PterodactylNative.applyUpdate();
+                      } else {
+                        location.reload();
+                      }
+                    } else if (updateWaiting && !isEditing()) {
+                      if (window.PterodactylNative && window.PterodactylNative.applyUpdate) {
+                        window.PterodactylNative.applyUpdate();
+                      } else {
+                        location.reload();
+                      }
+                    }
+                  } catch (_) {
+                    // A temporary network failure is not treated as a content update.
+                  } finally {
+                    running = false;
+                  }
+                }
+
+                window.__pteroLiveUpdateTimer = setInterval(poll, 3000);
+                setTimeout(poll, 1200);
+              } catch (_) {}
+            })();
+        """.trimIndent()
+        web.evaluateJavascript(script, null)
+    }
+
+    private inner class NativeBridge {
+        @JavascriptInterface
+        fun applyUpdate() {
+            runOnUiThread {
+                if (!::web.isInitialized) return@runOnUiThread
+                val current = web.url ?: route.url
+                // Clear only this WebView's HTTP resource cache; cookies and login storage remain.
+                web.clearCache(false)
+                web.loadUrl(current)
+                Toast.makeText(this@MainActivity, "Pembaruan panel dimuat.", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun openBestRoute(force: Boolean = false) {
