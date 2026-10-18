@@ -40,24 +40,17 @@ object PanelDiscovery {
         return networkName(c) + "|" + (lp?.linkAddresses?.joinToString { it.toString() } ?: "")
     }
 
+    /**
+     * Fast route selection must do no socket calls or subnet scan on the startup path.
+     * The panel is hosted on this same Android device, so loopback is deterministic on Wi-Fi.
+     * On mobile data/VPN, go straight to the public domain instead of scanning LAN addresses.
+     */
     fun choose(c: Context): RouteDecision {
-        if (networkName(c) != "Wi-Fi") return RouteDecision(CLOUD, "Cloudflare: bukan Wi-Fi")
-        // The panel and APK may live on the same Android phone; loopback is the most direct local route.
-        val loopback = "http://127.0.0.1:8080"
-        if (isPanel(loopback, 450, 550)) {
-            return RouteDecision(loopback, "Panel lokal di perangkat ini")
+        return if (networkName(c) == "Wi-Fi") {
+            RouteDecision("http://127.0.0.1:8080", "Panel lokal di perangkat ini")
+        } else {
+            RouteDecision(CLOUD, "Cloudflare: jaringan non-Wi-Fi")
         }
-        val prefs = c.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-        val old = prefs.getString(LAST, null)
-        if (!old.isNullOrBlank() && onSubnet(c, old) && isPanel(old, 500, 600)) {
-            return RouteDecision(old, "IP lokal tersimpan")
-        }
-        val found = scan(c)
-        if (found != null) {
-            prefs.edit().putString(LAST, found).apply()
-            return RouteDecision(found, "Panel terdeteksi di Wi-Fi lokal")
-        }
-        return RouteDecision(CLOUD, "Cloudflare: panel lokal tidak terdeteksi")
     }
 
     fun setCloud(c: Context) {
