@@ -62,6 +62,7 @@ class MainActivity : Activity() {
     private var reportText: TextView? = null
     private var diagnosing = false
     private var lastError = ""
+    @Volatile private var lastConsoleRecoveryAtMs = 0L
     @Volatile private var hideNextProgress = false
 
     private val sessionVault by lazy { SessionVault(applicationContext) }
@@ -160,7 +161,11 @@ class MainActivity : Activity() {
                 if (reportPage != null && !url.isNullOrBlank()) hideReport()
                 if (!url.isNullOrBlank() && isPanelUrl(url)) {
                     installSessionHelper()
-                    installLiveUpdateMonitor()
+                    if (isServerConsoleUrl(url)) {
+                        installConsoleRecovery()
+                    } else {
+                        installLiveUpdateMonitor()
+                    }
                     web.evaluateJavascript("!!document.querySelector('input[type=password]')") { result ->
                         if (!isFinishing && !isDestroyed && isPanelUrl(url)) {
                             if (result == "false") sessionVault.promotePending()
@@ -250,11 +255,99 @@ class MainActivity : Activity() {
      * Detects changed server-rendered HTML and changed JavaScript/CSS asset versions.
      * All polling is native-app WebView code. It never writes to the panel or server.
      */
+    /**
+     * Console recovery stays entirely inside this APK. On a power transition, ask the existing
+     * panel WebSocket handler to resync via its online event. If no new console row follows,
+     * perform one throttled silent page reconnect so the console re-subscribes to log output.
+     */
+    private fun installConsoleRecovery() {
+        val script = """
+            (function () {
+              try {
+                if (window.__pteroConsoleRecoveryTimer) clearInterval(window.__pteroConsoleRecoveryTimer);
+                var parts = location.pathname.split('/').filter(Boolean);
+                if (parts.length < 2 || parts[0] !== 'server') return;
+
+                var lastLine = '';
+                var lastState = '';
+                var pending = false;
+                var pendingAt = 0;
+                var recoveryRequested = false;
+
+                function getLastRow() {
+                  var rows = document.querySelectorAll('.xterm-rows > div');
+                  for (var i = rows.length - 1; i >= 0; i--) {
+                    var line = (rows[i].innerText || rows[i].textContent || '').replace(/\u00a0/g, ' ').trim();
+                    if (line) return line;
+                  }
+                  return '';
+                }
+
+                function trySoftResync() {
+                  try { window.dispatchEvent(new Event('online')); } catch (_) {}
+                  try { document.dispatchEvent(new Event('visibilitychange')); } catch (_) {}
+                }
+
+                function inspect() {
+                  var line = getLastRow();
+                  if (!line) return;
+
+                  if (line !== lastLine) {
+                    lastLine = line;
+                    var match = line.match(/Server marked as (starting|stopping|running|offline)/i);
+                    if (match) {
+                      var state = match[1].toLowerCase();
+                      if ((state === 'starting' || state === 'stopping') && state !== lastState) {
+                        pending = true;
+                        pendingAt = Date.now();
+                        recoveryRequested = false;
+                        setTimeout(trySoftResync, 400);
+                      } else if (pending && state !== lastState) {
+                        // Keep a single recovery window through the stopping -> starting -> running cycle.
+                        pendingAt = Date.now();
+                      }
+                      lastState = state;
+                    } else if (pending) {
+                      // A new row after a lifecycle marker means the log stream resumed.
+                      pending = false;
+                      recoveryRequested = false;
+                    }
+                  }
+
+                  if (pending && !recoveryRequested && Date.now() - pendingAt >= 9000) {
+                    var active = document.activeElement;
+                    var commandInput = active && active.matches &&
+                      active.matches('input[placeholder*="command" i]');
+                    if (commandInput) return;
+                    recoveryRequested = true;
+                    try {
+                      if (window.PterodactylNative && window.PterodactylNative.recoverConsole) {
+                        window.PterodactylNative.recoverConsole();
+                      }
+                    } catch (_) {}
+                  }
+                }
+
+                window.__pteroConsoleRecoveryTimer = setInterval(inspect, 500);
+                setTimeout(inspect, 350);
+              } catch (_) {}
+            })();
+        """.trimIndent()
+        web.evaluateJavascript(script, null)
+    }
+
     private fun installLiveUpdateMonitor() {
         val script = """
             (function () {
               try {
                 if (window.__pteroLiveUpdateTimer) clearInterval(window.__pteroLiveUpdateTimer);
+                // Server/console pages must not be polled/reloaded by live-update checks:
+                // doing so can tear down the authenticated console WebSocket during power actions.
+                var routeParts = location.pathname.split('/').filter(Boolean);
+                if (routeParts.length >= 2 && routeParts[0] === 'server') {
+                  window.__pteroLiveUpdateTimer = null;
+                  return;
+                }
                 var observedUrl = location.href;
                 var baseline = null;
                 var running = false;
@@ -472,6 +565,17 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
+        fun recoverConsole() {
+            if (!isTrustedPanelOrigin() || !isServerConsoleUrl(web.url ?: "")) return
+            val now = System.currentTimeMillis()
+            synchronized(this@MainActivity) {
+                if (now - lastConsoleRecoveryAtMs < 45_000L) return
+                lastConsoleRecoveryAtMs = now
+            }
+            reloadCurrentPanel(silent = true)
+        }
+
+        @JavascriptInterface
         fun getSavedLoginCredentials(): String {
             if (!isTrustedPanelOrigin()) return ""
             return sessionVault.loadSaved() ?: ""
@@ -513,6 +617,12 @@ class MainActivity : Activity() {
     }
 
     private fun isTrustedPanelOrigin(): Boolean = isPanelUrl(web.url ?: "")
+
+    private fun isServerConsoleUrl(value: String): Boolean {
+        val uri = try { Uri.parse(value) } catch (_: Exception) { return false }
+        val segments = (uri.path ?: "").split('/').filter { it.isNotBlank() }
+        return segments.size >= 2 && segments[0] == "server"
+    }
 
     private fun isPrivateIpv4(host: String): Boolean {
         if (!host.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) return false
