@@ -1,8 +1,6 @@
 name: Build Pterodactyl Android APK
 
 on:
-  push:
-    branches: ["pterodactyl-native-app"]
   workflow_dispatch:
 
 permissions:
