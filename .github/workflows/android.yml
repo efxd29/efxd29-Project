@@ -1,6 +1,8 @@
 name: Build Pterodactyl Android APK
 
 on:
+  push:
+    branches: ["pterodactyl-native-app"]
   workflow_dispatch:
 
 permissions:
@@ -32,6 +34,7 @@ jobs:
           cat .source/icon-part-*.b64 | base64 --decode > app/src/main/res/drawable-nodpi/ic_launcher_foreground.png
           file app/src/main/res/drawable-nodpi/ic_launcher_foreground.png
           test -s app/src/main/res/drawable-nodpi/ic_launcher_foreground.png
+          echo '20abbd57d9a6ac39ac0387441c84c82b8f529236bd1c8bf862507058f4b28be6  app/src/main/res/drawable-nodpi/ic_launcher_foreground.png' | sha256sum --check
 
       - name: Build debug APK
         run: gradle --no-daemon clean assembleDebug
