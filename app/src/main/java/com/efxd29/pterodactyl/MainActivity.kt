@@ -60,6 +60,7 @@ class MainActivity : Activity() {
     private var reportText: TextView? = null
     private var diagnosing = false
     private var lastError = ""
+    @Volatile private var hideNextProgress = false
 
     private val sessionVault by lazy { SessionVault(applicationContext) }
     private val autoLoginAttemptedHosts = java.util.Collections.synchronizedSet(mutableSetOf<String>())
@@ -132,7 +133,12 @@ class MainActivity : Activity() {
             }
 
             override fun onPageStarted(v: WebView, url: String?, icon: android.graphics.Bitmap?) {
-                progress.visibility = View.VISIBLE
+                if (hideNextProgress) {
+                    hideNextProgress = false
+                    progress.visibility = View.GONE
+                } else {
+                    progress.visibility = View.VISIBLE
+                }
             }
 
             override fun onPageFinished(v: WebView, url: String?) {
@@ -231,7 +237,8 @@ class MainActivity : Activity() {
                 var observedUrl = location.href;
                 var baseline = null;
                 var running = false;
-                var updateWaiting = false;
+                var candidate = null;
+                var candidateCount = 0;
                 var lastAssetCheck = 0;
                 var assetCache = '';
 
@@ -244,26 +251,13 @@ class MainActivity : Activity() {
                   return (hash >>> 0).toString(16);
                 }
 
-                function normalize(html) {
-                  var doc = new DOMParser().parseFromString(html, 'text/html');
-                  doc.querySelectorAll('meta[name*="csrf" i], meta[name*="xsrf" i]').forEach(function (n) { n.remove(); });
-                  doc.querySelectorAll('input[type="hidden"]').forEach(function (n) {
-                    if (/csrf|_token|xsrf/i.test((n.name || '') + ' ' + (n.id || ''))) n.remove();
-                  });
-                  doc.querySelectorAll('[nonce]').forEach(function (n) { n.removeAttribute('nonce'); });
-                  return doc.documentElement.outerHTML
-                    .replace(/(csrf[-_]?token|_token|xsrf[-_]?token)(["']?\s*[:=]\s*["'])[^"']+/gi, '$1$2TOKEN')
-                    .replace(/>\s+</g, '><')
-                    .replace(/\s+/g, ' ');
-                }
-
                 async function assetState(doc) {
                   var now = Date.now();
                   if (assetCache && now - lastAssetCheck < 1500) return assetCache;
                   var nodes = Array.from(doc.querySelectorAll('script[src], link[rel~="stylesheet"][href]'));
                   var urls = Array.from(new Set(nodes.map(function (n) { return n.src || n.href; }))).filter(function (u) {
                     try { return new URL(u, location.href).origin === location.origin; } catch (_) { return false; }
-                  });
+                  }).sort();
                   var parts = await Promise.all(urls.map(async function (u) {
                     try {
                       var r = await fetch(u, {
@@ -272,12 +266,18 @@ class MainActivity : Activity() {
                         credentials: 'include',
                         headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }
                       });
-                      return [u, r.status, r.headers.get('ETag') || '',
-                        r.headers.get('Last-Modified') || '',
-                        r.headers.get('Content-Length') || ''].join('|');
-                    } catch (_) { return u + '|unavailable'; }
+                      // Ignore transient/non-success responses instead of mistaking an outage for a deploy.
+                      if (!r.ok) return null;
+                      var etag = r.headers.get('ETag') || '';
+                      var modified = r.headers.get('Last-Modified') || '';
+                      var length = r.headers.get('Content-Length') || '';
+                      return [u, r.status, etag, modified, length].join('|');
+                    } catch (_) {
+                      return null;
+                    }
                   }));
-                  assetCache = parts.sort().join('\n');
+                  if (parts.some(function (p) { return p === null; })) return null;
+                  assetCache = parts.join('\n');
                   lastAssetCheck = now;
                   return assetCache;
                 }
@@ -296,21 +296,29 @@ class MainActivity : Activity() {
                   });
                   if (!response.ok || !/text\/html/i.test(response.headers.get('Content-Type') || '')) return null;
                   try {
+                    // Don't treat auth redirects or navigations as code updates.
                     if (new URL(response.url).pathname !== new URL(requestUrl).pathname) return null;
                   } catch (_) { return null; }
                   var html = await response.text();
                   var doc = new DOMParser().parseFromString(html, 'text/html');
-                  var stableHtml = normalize(html);
+                  // Compare only asset paths and stable validators, never dynamic HTML, CSRF tokens,
+                  // per-request markup, or session details. That prevents an endless reload loop.
+                  var urls = Array.from(new Set(Array.from(doc.querySelectorAll('script[src], link[rel~="stylesheet"][href]')).map(function (n) {
+                    try {
+                      var parsed = new URL(n.src || n.href, location.href);
+                      if (parsed.origin !== location.origin) return null;
+                      return parsed.pathname + parsed.search;
+                    } catch (_) { return null; }
+                  }).filter(Boolean))).sort().join('\n');
                   var assets = await assetState(doc);
-                  return digest(stableHtml + '\n--assets--\n' + assets);
+                  if (assets === null) return null;
+                  return digest(urls + '\n--asset-validators--\n' + assets);
                 }
 
                 function isEditing() {
                   var active = document.activeElement;
                   if (!active) return false;
-                  if (active.matches && active.matches('input:not([type="hidden"]), textarea, [contenteditable="true"], [role="textbox"]')) {
-                    return true;
-                  }
+                  if (active.matches && active.matches('input:not([type="hidden"]), textarea, [contenteditable="true"], [role="textbox"]')) return true;
                   if (active.closest && active.closest('.xterm, .xterm-screen, [data-ptero-console]')) return true;
                   return false;
                 }
@@ -345,7 +353,8 @@ class MainActivity : Activity() {
                   if (location.href !== observedUrl) {
                     observedUrl = location.href;
                     baseline = null;
-                    updateWaiting = false;
+                    candidate = null;
+                    candidateCount = 0;
                     var oldBanner = document.getElementById('ptero-app-update-banner');
                     if (oldBanner) oldBanner.remove();
                     return;
@@ -353,54 +362,78 @@ class MainActivity : Activity() {
                   running = true;
                   try {
                     var next = await getSignature();
-                    if (next === null) return;
+                    if (next === null) {
+                      candidate = null;
+                      candidateCount = 0;
+                      return;
+                    }
                     if (baseline === null) {
                       baseline = next;
                       return;
                     }
-                    if (next !== baseline) {
-                      baseline = next;
-                      updateWaiting = true;
-                      if (isEditing()) {
-                        showUpdateBanner();
-                      } else if (window.PterodactylNative && window.PterodactylNative.applyUpdate) {
-                        window.PterodactylNative.applyUpdate();
-                      } else {
-                        location.reload();
-                      }
-                    } else if (updateWaiting && !isEditing()) {
-                      if (window.PterodactylNative && window.PterodactylNative.applyUpdate) {
-                        window.PterodactylNative.applyUpdate();
-                      } else {
-                        location.reload();
-                      }
+                    if (next === baseline) {
+                      candidate = null;
+                      candidateCount = 0;
+                      return;
+                    }
+                    // Require the same changed signature twice to filter temporary CDN/header noise.
+                    if (candidate === next) candidateCount += 1;
+                    else {
+                      candidate = next;
+                      candidateCount = 1;
+                    }
+                    if (candidateCount < 2) return;
+
+                    baseline = next;
+                    candidate = null;
+                    candidateCount = 0;
+                    if (isEditing()) {
+                      showUpdateBanner();
+                      return;
+                    }
+                    if (window.PterodactylNative && window.PterodactylNative.applyUpdateSilently) {
+                      window.PterodactylNative.applyUpdateSilently();
+                    } else {
+                      // Fallback without native support: mark update only; avoid disruptive reload loops.
+                      showUpdateBanner();
                     }
                   } catch (_) {
-                    // A temporary network failure is not treated as a content update.
+                    // Network errors don't count as code changes and never trigger a page reload.
                   } finally {
                     running = false;
                   }
                 }
 
-                window.__pteroLiveUpdateTimer = setInterval(poll, 250);
-                setTimeout(poll, 150);
+                window.__pteroLiveUpdateTimer = setInterval(poll, 1000);
+                setTimeout(poll, 250);
               } catch (_) {}
             })();
         """.trimIndent()
         web.evaluateJavascript(script, null)
     }
 
+    private fun reloadCurrentPanel(silent: Boolean) {
+        runOnUiThread {
+            if (!::web.isInitialized || isFinishing || isDestroyed) return@runOnUiThread
+            val current = web.url ?: route.url
+            if (silent) hideNextProgress = true
+            // Clear the in-memory resource cache only. Cookies and local/session storage remain intact.
+            web.clearCache(false)
+            web.loadUrl(current)
+            CookieManager.getInstance().flush()
+            if (silent) progress.visibility = View.GONE
+        }
+    }
+
     private inner class NativeBridge {
         @JavascriptInterface
         fun applyUpdate() {
-            runOnUiThread {
-                if (!::web.isInitialized) return@runOnUiThread
-                val current = web.url ?: route.url
-                // Cache only; never clear cookies, session storage or credentials here.
-                web.clearCache(false)
-                web.loadUrl(current)
-                CookieManager.getInstance().flush()
-            }
+            reloadCurrentPanel(silent = false)
+        }
+
+        @JavascriptInterface
+        fun applyUpdateSilently() {
+            reloadCurrentPanel(silent = true)
         }
 
         @JavascriptInterface
