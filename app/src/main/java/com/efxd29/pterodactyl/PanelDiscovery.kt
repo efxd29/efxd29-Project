@@ -42,6 +42,11 @@ object PanelDiscovery {
 
     fun choose(c: Context): RouteDecision {
         if (networkName(c) != "Wi-Fi") return RouteDecision(CLOUD, "Cloudflare: bukan Wi-Fi")
+        // The panel and APK may live on the same Android phone; loopback is the most direct local route.
+        val loopback = "http://127.0.0.1:8080"
+        if (isPanel(loopback, 450, 550)) {
+            return RouteDecision(loopback, "Panel lokal di perangkat ini")
+        }
         val prefs = c.getSharedPreferences(PREF, Context.MODE_PRIVATE)
         val old = prefs.getString(LAST, null)
         if (!old.isNullOrBlank() && onSubnet(c, old) && isPanel(old, 500, 600)) {
