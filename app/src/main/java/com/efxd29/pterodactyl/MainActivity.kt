@@ -26,6 +26,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.JavascriptInterface
 import android.webkit.WebViewClient
 import android.webkit.RenderProcessGoneDetail
 import android.widget.Button
@@ -210,6 +211,8 @@ class MainActivity : Activity() {
                 var baseline = null;
                 var running = false;
                 var updateWaiting = false;
+                var lastAssetCheck = 0;
+                var assetCache = '';
 
                 function digest(value) {
                   var hash = 2166136261;
@@ -234,6 +237,8 @@ class MainActivity : Activity() {
                 }
 
                 async function assetState(doc) {
+                  var now = Date.now();
+                  if (assetCache && now - lastAssetCheck < 1500) return assetCache;
                   var nodes = Array.from(doc.querySelectorAll('script[src], link[rel~="stylesheet"][href]'));
                   var urls = Array.from(new Set(nodes.map(function (n) { return n.src || n.href; }))).filter(function (u) {
                     try { return new URL(u, location.href).origin === location.origin; } catch (_) { return false; }
@@ -246,17 +251,14 @@ class MainActivity : Activity() {
                         credentials: 'include',
                         headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }
                       });
-                      var value = [
-                        u,
-                        r.status,
-                        r.headers.get('ETag') || '',
+                      return [u, r.status, r.headers.get('ETag') || '',
                         r.headers.get('Last-Modified') || '',
-                        r.headers.get('Content-Length') || ''
-                      ].join('|');
-                      return value;
+                        r.headers.get('Content-Length') || ''].join('|');
                     } catch (_) { return u + '|unavailable'; }
                   }));
-                  return parts.sort().join('\n');
+                  assetCache = parts.sort().join('\n');
+                  lastAssetCheck = now;
+                  return assetCache;
                 }
 
                 async function getSignature() {
@@ -359,8 +361,8 @@ class MainActivity : Activity() {
                   }
                 }
 
-                window.__pteroLiveUpdateTimer = setInterval(poll, 3000);
-                setTimeout(poll, 1200);
+                window.__pteroLiveUpdateTimer = setInterval(poll, 250);
+                setTimeout(poll, 150);
               } catch (_) {}
             })();
         """.trimIndent()
