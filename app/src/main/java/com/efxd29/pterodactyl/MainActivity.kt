@@ -267,7 +267,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(22), dp(25), dp(22), dp(28))
         }
-        scroll.addView(box, ScrollView.LayoutParams(-1, -2))
+        scroll.addView(box, FrameLayout.LayoutParams(-1, -2))
         box.addView(label("Pterodactyl", 14, 0xFF9AA5B5.toInt(), true))
         val heading = label("Panel tidak dapat diakses", 25, Color.WHITE, true).apply { tag = "report_title" }
         box.addView(heading, spaceParams(8, 12))
