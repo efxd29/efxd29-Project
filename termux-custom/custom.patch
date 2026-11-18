@@ -297,7 +297,7 @@ diff --git a/terminal-view/src/main/java/com/termux/view/textselection/TextSelec
 index c2cd7c6..626d4d9 100644
 --- a/termux-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
 +++ b/termux-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
-@@ -53,6 +53,20 @@ public class TextSelectionCursorController implements CursorController {
+@@ -53,10 +53,24 @@ public class TextSelectionCursorController implements CursorController {
          mIsSelectingText = true;
      }
  
