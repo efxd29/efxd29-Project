@@ -340,7 +340,7 @@ diff --git a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/
 index acabc47..53beaed 100644
 --- a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
 +++ b/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
-@@ -76,7 +76,9 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
+@@ -76,6 +76,8 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
              environment.putAll(termuxApiAppEnvironment);
  
          environment.put(ENV_HOME, TermuxConstants.TERMUX_HOME_DIR_PATH);
