@@ -135,7 +135,7 @@ index b141499..97e50bc 100644
 +            if (subshellStart < 0) {
 +                throw new IllegalStateException("Unexpected bootstrap fallback script format");
 +            }
-
++
 +            String quietOutput =
 +                "\n# Keep bootstrap second-stage output out of the interactive terminal.\n" +
 +                "mkdir -p \"$PREFIX/var/log\" >/dev/null 2>&1 || true\n" +
@@ -230,7 +230,7 @@ index a38e8cb..8fe3644 100644
                  mTermuxTerminalViewClient.onToggleSoftKeyboardRequest();
          } else if ("DRAWER".equals(key)) {
 @@ -100,9 +125,45 @@ public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
-                         TerminalView terminalView = mTermuxTerminalViewClient.getActivity().getTerminalView();
+             TerminalView terminalView = mTermuxTerminalViewClient.getActivity().getTerminalView();
              if (terminalView != null && terminalView.mEmulator != null)
                  terminalView.mEmulator.toggleAutoScrollDisabled();
 +        } else if ("CLEAR".equals(key) ||
@@ -298,10 +298,15 @@ index c2cd7c6..626d4d9 100644
 --- a/termux-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
 +++ b/termux-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
 @@ -53,6 +53,20 @@ public class TextSelectionCursorController implements CursorController {
-         mSelX1 = 0;
-         mSelY1 = startRow;
-         mSelX2 = terminalView.mEmulator.mColumns - 1;
-         mSelY2 = endRow;
+         mIsSelectingText = true;
+     }
+ 
++    /** Select whole rows programmatically (no touch event), used by the SELECT ALL extra key. */
++    public void showRange(int startRow, int endRow) {
++        mSelX1 = 0;
++        mSelY1 = startRow;
++        mSelX2 = terminalView.mEmulator.mColumns - 1;
++        mSelY2 = endRow;
 +        mStartHandle.positionAtCursor(mSelX1, mSelY1, true);
 +        mEndHandle.positionAtCursor(mSelX2 + 1, mSelY2, true);
 +
@@ -310,15 +315,14 @@ index c2cd7c6..626d4d9 100644
 +        mIsSelectingText = true;
 +    }
 +
-+    @Override
-+    public boolean hide() {
-+        if (!isActive()) return false;
-+        hideTextSelectionCursors();
-+        mIsSelectingText = false;
-+        return true;
-+    }
-+
-+}
+     @Override
+     public boolean hide() {
+         if (!isActive()) return false;
+         hideTextSelectionCursors();
+         mIsSelectingText = false;
+         return true;
+     }
+
 diff --git a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java b/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
 index 534936f..e496717 100644
 --- a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java b/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
