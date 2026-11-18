@@ -338,7 +338,8 @@ index 534936f..e496717 100644
  
 diff --git a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java b/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
 index acabc47..53beaed 100644
---- a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java b/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
+--- a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
++++ b/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
 @@ -76,7 +76,9 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
              environment.putAll(termuxApiAppEnvironment);
  
