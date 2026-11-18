@@ -5,7 +5,7 @@ on:
     branches: [termux-apk]
     paths:
       - 'termux-custom/**'
-      - '.github/workflows/build.yml'
+      - '.github/workflows/build-termux.yml'
   workflow_dispatch:
 
 permissions:
