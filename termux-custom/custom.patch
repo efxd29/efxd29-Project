@@ -297,7 +297,7 @@ diff --git a/terminal-view/src/main/java/com/termux/view/textselection/TextSelec
 index c2cd7c6..626d4d9 100644
 --- a/termux-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
 +++ b/termux-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
-@@ -53,10 +53,24 @@ public class TextSelectionCursorController implements CursorController {
+@@ -53,11 +53,25 @@ public class TextSelectionCursorController implements CursorController {
          mIsSelectingText = true;
      }
  
@@ -322,7 +322,7 @@ index c2cd7c6..626d4d9 100644
          mIsSelectingText = false;
          return true;
      }
-
+ 
 diff --git a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java b/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
 index 534936f..e496717 100644
 --- a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
@@ -339,7 +339,7 @@ index 534936f..e496717 100644
 diff --git a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java b/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
 index acabc47..53beaed 100644
 --- a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java b/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
-@@ -76,6 +76,8 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
+@@ -76,7 +76,9 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
              environment.putAll(termuxApiAppEnvironment);
  
          environment.put(ENV_HOME, TermuxConstants.TERMUX_HOME_DIR_PATH);
@@ -348,3 +348,4 @@ index acabc47..53beaed 100644
          environment.put(ENV_PREFIX, TermuxConstants.TERMUX_PREFIX_DIR_PATH);
  
          // If failsafe is not enabled, then we keep default PATH and TMPDIR so that system binaries can be used
+ 
