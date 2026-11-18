@@ -1,0 +1,159 @@
+package com.termux.app.terminal.io;
+
+import android.annotation.SuppressLint;
+import android.view.Gravity;
+import android.view.View;
+
+import androidx.annotation.NonNull;
+import androidx.drawerlayout.widget.DrawerLayout;
+
+import com.termux.app.TermuxActivity;
+import com.termux.app.terminal.TermuxTerminalSessionActivityClient;
+import com.termux.app.terminal.TermuxTerminalViewClient;
+import com.termux.shared.logger.Logger;
+import com.termux.shared.termux.extrakeys.ExtraKeysConstants;
+import com.termux.shared.termux.extrakeys.ExtraKeysInfo;
+import com.termux.shared.termux.settings.properties.TermuxPropertyConstants;
+import com.termux.shared.termux.settings.properties.TermuxSharedProperties;
+import com.termux.shared.termux.terminal.io.TerminalExtraKeys;
+import com.termux.terminal.TerminalBuffer;
+import com.termux.view.TerminalView;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
+
+    private ExtraKeysInfo mExtraKeysInfo;
+    private ExtraKeysInfo mCollapsedExtraKeysInfo;
+    private boolean mKeysCollapsed = false;
+
+    final TermuxActivity mActivity;
+    final TermuxTerminalViewClient mTermuxTerminalViewClient;
+    final TermuxTerminalSessionActivityClient mTermuxTerminalSessionActivityClient;
+
+    private static final String LOG_TAG = "TermuxTerminalExtraKeys";
+
+    public TermuxTerminalExtraKeys(TermuxActivity activity, @NonNull TerminalView terminalView,
+                                   TermuxTerminalViewClient termuxTerminalViewClient,
+                                   TermuxTerminalSessionActivityClient termuxTerminalSessionActivityClient) {
+        super(terminalView);
+
+        mActivity = activity;
+        mTermuxTerminalViewClient = termuxTerminalViewClient;
+        mTermuxTerminalSessionActivityClient = termuxTerminalSessionActivityClient;
+
+        setExtraKeys();
+    }
+
+
+    /**
+     * Set the terminal extra keys and style.
+     */
+    private void setExtraKeys() {
+        mExtraKeysInfo = null;
+
+        try {
+            // The mMap stores the extra key and style string values while loading properties
+            // Check {@link #getExtraKeysInternalPropertyValueFromValue(String)} and
+            // {@link #getExtraKeysStyleInternalPropertyValueFromValue(String)}
+            String extrakeys = (String) mActivity.getProperties().getInternalPropertyValue(TermuxPropertyConstants.KEY_EXTRA_KEYS, true);
+            String extraKeysStyle = (String) mActivity.getProperties().getInternalPropertyValue(TermuxPropertyConstants.KEY_EXTRA_KEYS_STYLE, true);
+
+            JSONArray keysMatrix = new JSONArray(extrakeys);
+            JSONArray actionRow = new JSONArray();
+            actionRow.put(new JSONObject().put("key", "CLEAR").put("display", "CLEAR"));
+            actionRow.put(new JSONObject().put("macro", "CTRL c").put("display", "EXIT"));
+            actionRow.put(new JSONObject().put("key", "SELECT_ALL").put("display", "SELECT ALL"));
+            actionRow.put(new JSONObject().put("key", "HIDE_KEYS").put("display", "HIDE KEYS"));
+            actionRow.put(new JSONObject().put("key", "COPY").put("display", "COPY"));
+            actionRow.put(new JSONObject().put("key", "ENTER").put("display", "ENTER"));
+            actionRow.put(new JSONObject().put("key", "KEYBOARD").put("display", "⌨"));
+            keysMatrix.put(actionRow);
+            extrakeys = keysMatrix.toString();
+
+            ExtraKeysConstants.ExtraKeyDisplayMap extraKeyDisplayMap = ExtraKeysInfo.getCharDisplayMapForStyle(extraKeysStyle);
+            if (ExtraKeysConstants.EXTRA_KEY_DISPLAY_MAPS.DEFAULT_CHAR_DISPLAY.equals(extraKeyDisplayMap) && !TermuxPropertyConstants.DEFAULT_IVALUE_EXTRA_KEYS_STYLE.equals(extraKeysStyle)) {
+                Logger.logError(TermuxSharedProperties.LOG_TAG, "The style \"" + extraKeysStyle + "\" for the key \"" + TermuxPropertyConstants.KEY_EXTRA_KEYS_STYLE + "\" is invalid. Using default style instead.");
+                extraKeysStyle = TermuxPropertyConstants.DEFAULT_IVALUE_EXTRA_KEYS_STYLE;
+            }
+
+            mExtraKeysInfo = new ExtraKeysInfo(extrakeys, extraKeysStyle, ExtraKeysConstants.CONTROL_CHARS_ALIASES);
+            mCollapsedExtraKeysInfo = new ExtraKeysInfo("[[{\"key\":\"HIDE_KEYS\",\"display\":\"SHOW KEYS\"}]]",
+                extraKeysStyle, ExtraKeysConstants.CONTROL_CHARS_ALIASES);
+        } catch (JSONException e) {
+            Logger.showToast(mActivity, "Could not load and set the \"" + TermuxPropertyConstants.KEY_EXTRA_KEYS + "\" property from the properties file: " + e.toString(), true);
+            Logger.logStackTraceWithMessage(LOG_TAG, "Could not load and set the \"" + TermuxPropertyConstants.KEY_EXTRA_KEYS + "\" property from the properties file: ", e);
+
+            try {
+                mExtraKeysInfo = new ExtraKeysInfo(TermuxPropertyConstants.DEFAULT_IVALUE_EXTRA_KEYS, TermuxPropertyConstants.DEFAULT_IVALUE_EXTRA_KEYS_STYLE, ExtraKeysConstants.CONTROL_CHARS_ALIASES);
+            } catch (JSONException e2) {
+                Logger.showToast(mActivity, "Can't create default extra keys",true);
+                Logger.logStackTraceWithMessage(LOG_TAG, "Could create default extra keys: ", e);
+                mExtraKeysInfo = null;
+            }
+        }
+    }
+
+    public ExtraKeysInfo getExtraKeysInfo() {
+        return mKeysCollapsed && mCollapsedExtraKeysInfo != null ? mCollapsedExtraKeysInfo : mExtraKeysInfo;
+    }
+
+    @SuppressLint("RtlHardcoded")
+    @Override
+    public void onTerminalExtraKeyButtonClick(View view, String key, boolean ctrlDown, boolean altDown, boolean shiftDown, boolean fnDown) {
+        if ("HIDE_KEYS".equals(key)) {
+            mKeysCollapsed = !mKeysCollapsed;
+            view.post(mActivity::reloadExtraKeys);
+        } else if ("KEYBOARD".equals(key)) {
+            if(mTermuxTerminalViewClient != null)
+                mTermuxTerminalViewClient.onToggleSoftKeyboardRequest();
+        } else if ("DRAWER".equals(key)) {
+            DrawerLayout drawerLayout = mTermuxTerminalViewClient.getActivity().getDrawer();
+            if (drawerLayout.isDrawerOpen(Gravity.LEFT))
+                drawerLayout.closeDrawer(Gravity.LEFT);
+            else
+                drawerLayout.openDrawer(Gravity.LEFT);
+        } else if ("PASTE".equals(key)) {
+            if(mTermuxTerminalSessionActivityClient != null)
+                mTermuxTerminalSessionActivityClient.onPasteTextFromClipboard(null);
+        }  else if ("SCROLL".equals(key)) {
+            TerminalView terminalView = mTermuxTerminalViewClient.getActivity().getTerminalView();
+            if (terminalView != null && terminalView.mEmulator != null)
+                terminalView.mEmulator.toggleAutoScrollDisabled();
+        } else if ("CLEAR".equals(key) || "SELECT_ALL".equals(key) || "COPY".equals(key)) {
+            TerminalView terminalView = mTermuxTerminalViewClient.getActivity().getTerminalView();
+            handleTerminalAction(terminalView, key);
+        } else {
+            super.onTerminalExtraKeyButtonClick(view, key, ctrlDown, altDown, shiftDown, fnDown);
+        }
+    }
+
+    private void handleTerminalAction(TerminalView terminalView, String action) {
+        if (terminalView == null || terminalView.mEmulator == null || terminalView.mTermSession == null) return;
+        TerminalBuffer screen = terminalView.mEmulator.getScreen();
+        int firstRow = -screen.getActiveTranscriptRows();
+        int lastRow = terminalView.mEmulator.mRows - 1;
+        if ("SELECT_ALL".equals(action)) {
+            terminalView.selectTextRange(firstRow, lastRow);
+            return;
+        }
+        if ("COPY".equals(action)) {
+            String selectedText = terminalView.getSelectedText();
+            if (selectedText == null || selectedText.isEmpty()) {
+                Logger.showToast(mActivity, "Select text before copying", true);
+                return;
+            }
+            terminalView.stopTextSelectionMode();
+            terminalView.mTermSession.onCopyTextToClipboard(selectedText);
+            return;
+        }
+        if ("CLEAR".equals(action)) {
+            screen.clearTranscript();
+            terminalView.mTermSession.writeCodePoint(false, 12);
+            terminalView.onScreenUpdated();
+        }
+    }
+
+}
