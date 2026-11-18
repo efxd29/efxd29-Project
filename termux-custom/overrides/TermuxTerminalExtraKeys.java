@@ -68,8 +68,8 @@ public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
             actionRow.put(new JSONObject().put("key", "SELECT_ALL").put("display", "SELECT ALL"));
             actionRow.put(new JSONObject().put("key", "HIDE_KEYS").put("display", "HIDE KEYS"));
             actionRow.put(new JSONObject().put("key", "COPY").put("display", "COPY"));
+            actionRow.put(new JSONObject().put("key", "PASTE").put("display", "PASTE"));
             actionRow.put(new JSONObject().put("key", "ENTER").put("display", "ENTER"));
-            actionRow.put(new JSONObject().put("key", "KEYBOARD").put("display", "⌨"));
             keysMatrix.put(actionRow);
             extrakeys = keysMatrix.toString();
 
