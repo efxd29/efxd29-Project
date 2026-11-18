@@ -1,0 +1,345 @@
+diff --git a/app/src/main/java/com/termux/app/TermuxActivity.java b/app/src/main/java/com/termux/app/TermuxActivity.java
+index 0c9f741..9fdf724 100644
+--- a/app/src/main/java/com/termux/app/TermuxActivity.java
++++ b/app/src/main/java/com/termux/app/TermuxActivity.java
+@@ -391,6 +391,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
+ 
+         setTermuxSessionsListView();
+ 
++        // $HOME is in shared storage: create it before the first shell starts, or ask for permission.
++        if (!TermuxInstaller.ensureHomeDirectory())
++            requestStoragePermission(false);
++
+         final Intent intent = getIntent();
+         setIntent(null);
+ 
+@@ -551,6 +555,13 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
+         }
+     }
+ 
++    /** Re-render the extra keys, e.g. after HIDE KEYS collapsed or expanded them. */
++    public void reloadExtraKeys() {
++        if (mExtraKeysView == null || mTermuxTerminalExtraKeys == null) return;
++        setTerminalToolbarHeight();
++        mExtraKeysView.reload(mTermuxTerminalExtraKeys.getExtraKeysInfo(), mTerminalToolbarDefaultHeight);
++    }
++
+     private void saveTerminalToolbarTextInput(Bundle savedInstanceState) {
+         if (savedInstanceState == null) return;
+ 
+@@ -779,7 +790,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
+                         Logger.logInfoAndShowToast(TermuxActivity.this, LOG_TAG,
+                             getString(com.termux.shared.R.string.msg_storage_permission_granted_on_request));
+ 
+-                    TermuxInstaller.setupStorageSymlinks(TermuxActivity.this);
++                    TermuxInstaller.ensureHomeDirectory();
+                 } else {
+                     if (isPermissionCallback)
+                         Logger.logInfoAndShowToast(TermuxActivity.this, LOG_TAG,
+diff --git a/app/src/main/java/com/termux/app/TermuxInstaller.java b/app/src/main/java/com/termux/app/TermuxInstaller.java
+index b141499..97e50bc 100644
+--- a/app/src/main/java/com/termux/app/TermuxInstaller.java
++++ b/app/src/main/java/com/termux/app/TermuxInstaller.java
+@@ -6,7 +6,10 @@ import android.app.ProgressDialog;
+ import android.content.Context;
+ import android.os.Build;
+ import android.os.Environment;
++import android.system.ErrnoException;
+ import android.system.Os;
++import android.system.OsConstants;
++import android.system.StructStat;
+ import android.util.Pair;
+ import android.view.WindowManager;
+ 
+@@ -26,8 +29,10 @@ import com.termux.shared.termux.shell.command.environment.TermuxShellEnvironment
+ import java.io.BufferedReader;
+ import java.io.ByteArrayInputStream;
+ import java.io.File;
++import java.io.FileInputStream;
+ import java.io.FileOutputStream;
+ import java.io.InputStreamReader;
++import java.nio.charset.StandardCharsets;
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.zip.ZipEntry;
+@@ -204,6 +209,10 @@ final class TermuxInstaller {
+                         }
+                     }
+ 
++                    // Keep the required bootstrap fallback running, but capture its terminal
++                    // output inside the private Termux prefix so first shell startup stays clean.
++                    silenceBootstrapSecondStageFallback();
++
+                     if (symlinks.isEmpty())
+                         throw new RuntimeException("No SYMLINKS.txt encountered");
+                     for (Pair<String, String> symlink : symlinks) {
+@@ -274,6 +283,37 @@ final class TermuxInstaller {
+             true, false, TermuxUtils.AppInfoMode.TERMUX_AND_PLUGIN_PACKAGES, true);
+     }
+ 
++    /**
++     * $HOME lives in shared storage, so make sure it exists and keep the old hardcoded
++     * path (files/home, used by scripts like etc/profile) pointing to it.
++     *
++     * @return {@code true} if $HOME exists and is writable, {@code false} if storage permission is missing.
++     */
++    static boolean ensureHomeDirectory() {
++        final String LOG_TAG = "termux-home";
++        File home = TermuxConstants.TERMUX_HOME_DIR;
++        if (!home.isDirectory()) home.mkdirs();
++        boolean homeUsable = home.isDirectory() && home.canWrite();
++
++        File legacyHome = new File(TermuxConstants.TERMUX_FILES_DIR_PATH, "home");
++        try {
++            try {
++                StructStat stat = Os.lstat(legacyHome.getAbsolutePath());
++                if (OsConstants.S_ISLNK(stat.st_mode)) return homeUsable;
++                // Keep a real old home that still has user data in it.
++                String[] children = legacyHome.list();
++                if (children == null || children.length > 0) return homeUsable;
++                legacyHome.delete();
++            } catch (ErrnoException e) {
++                // Old home does not exist yet.
++            }
++            Os.symlink(home.getAbsolutePath(), legacyHome.getAbsolutePath());
++        } catch (Exception e) {
++            Logger.logStackTraceWithMessage(LOG_TAG, "Could not link old home path to " + home.getAbsolutePath(), e);
++        }
++        return homeUsable;
++    }
++
+     static void setupStorageSymlinks(final Context context) {
+         final String LOG_TAG = "termux-storage";
+         final String title = TermuxConstants.TERMUX_APP_NAME + " Setup Storage Error";
+@@ -371,6 +411,44 @@ final class TermuxInstaller {
+         }.start();
+     }
+ 
++    private static void silenceBootstrapSecondStageFallback() {
++        File fallbackScript = new File(TERMUX_STAGING_PREFIX_DIR_PATH,
++            "etc/profile.d/01-termux-bootstrap-second-stage-fallback.sh");
++        if (!fallbackScript.isFile()) return;
++
++        try {
++            StringBuilder content = new StringBuilder();
++            try (BufferedReader reader = new BufferedReader(new InputStreamReader(
++                new FileInputStream(fallbackScript), StandardCharsets.UTF_8))) {
++                String line;
++                while ((line = reader.readLine()) != null) {
++                    content.append(line).append('\n');
++                }
++            }
++
++            String script = content.toString();
++            int subshellStart = script.indexOf("(\n");
++            if (subshellStart < 0) {
++                throw new IllegalStateException("Unexpected bootstrap fallback script format");
++            }
+
++            String quietOutput =
++                "\n# Keep bootstrap second-stage output out of the interactive terminal.\n" +
++                "mkdir -p \"$PREFIX/var/log\" >/dev/null 2>&1 || true\n" +
++                "exec >> \"$PREFIX/var/log/termux-bootstrap-second-stage.log\" 2>&1\n";
++            int insertAt = subshellStart + 2;
++            script = script.substring(0, insertAt) + quietOutput + script.substring(insertAt);
++
++            try (FileOutputStream output = new FileOutputStream(fallbackScript, false)) {
++                output.write(script.getBytes(StandardCharsets.UTF_8));
++            }
++            Logger.logInfo(LOG_TAG, "Bootstrap second-stage fallback output redirected to the private prefix log.");
++        } catch (Exception e) {
++            // Do not abort bootstrap installation if a future upstream script changes format.
++            Logger.logStackTraceWithMessage(LOG_TAG, "Could not redirect bootstrap fallback output: ", e);
++        }
++    }
++
+     private static Error ensureDirectoryExists(File directory) {
+         return FileUtils.createDirectoryFile(directory.getAbsolutePath());
+     }
+diff --git a/app/src/main/java/com/termux/app/terminal/io/TermuxTerminalExtraKeys.java b/app/src/main/java/com/termux/app/terminal/io/TermuxTerminalExtraKeys.java
+index a38e8cb..8fe3644 100644
+--- a/app/src/main/java/com/termux/app/terminal/io/TermuxTerminalExtraKeys.java
++++ b/app/src/main/java/com/termux/app/terminal/io/TermuxTerminalExtraKeys.java
+@@ -16,13 +16,19 @@ import com.termux.shared.termux.extrakeys.ExtraKeysInfo;
+ import com.termux.shared.termux.settings.properties.TermuxPropertyConstants;
+ import com.termux.shared.termux.settings.properties.TermuxSharedProperties;
+ import com.termux.shared.termux.terminal.io.TerminalExtraKeys;
++import com.termux.terminal.TerminalBuffer;
+ import com.termux.view.TerminalView;
+ 
++import org.json.JSONArray;
+ import org.json.JSONException;
++import org.json.JSONObject;
+ 
+ public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
+ 
+     private ExtraKeysInfo mExtraKeysInfo;
++    /** Single-row layout with only the HIDE KEYS button, shown while the other keys are hidden. */
++    private ExtraKeysInfo mCollapsedExtraKeysInfo;
++    private boolean mKeysCollapsed = false;
+ 
+     final TermuxActivity mActivity;
+     final TermuxTerminalViewClient mTermuxTerminalViewClient;
+@@ -56,6 +62,19 @@ public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
+             String extrakeys = (String) mActivity.getProperties().getInternalPropertyValue(TermuxPropertyConstants.KEY_EXTRA_KEYS, true);
+             String extraKeysStyle = (String) mActivity.getProperties().getInternalPropertyValue(TermuxPropertyConstants.KEY_EXTRA_KEYS_STYLE, true);
+ 
++            // Append built-in terminal actions in memory; do not modify the user's properties file.
++            JSONArray keysMatrix = new JSONArray(extrakeys);
++            JSONArray actionRow = new JSONArray();
++            actionRow.put(new JSONObject().put("key", "CLEAR").put("display", "CLEAR"));
++            actionRow.put(new JSONObject().put("macro", "CTRL c").put("display", "EXIT"));
++            actionRow.put(new JSONObject().put("key", "SELECT_ALL").put("display", "SELECT ALL"));
++            actionRow.put(new JSONObject().put("key", "HIDE_KEYS").put("display", "HIDE KEYS"));
++            actionRow.put(new JSONObject().put("key", "COPY").put("display", "COPY"));
++            actionRow.put(new JSONObject().put("key", "ENTER").put("display", "ENTER"));
++            actionRow.put(new JSONObject().put("key", "KEYBOARD").put("display", "⌨"));
++            keysMatrix.put(actionRow);
++            extrakeys = keysMatrix.toString();
++
+             ExtraKeysConstants.ExtraKeyDisplayMap extraKeyDisplayMap = ExtraKeysInfo.getCharDisplayMapForStyle(extraKeysStyle);
+             if (ExtraKeysConstants.EXTRA_KEY_DISPLAY_MAPS.DEFAULT_CHAR_DISPLAY.equals(extraKeyDisplayMap) && !TermuxPropertyConstants.DEFAULT_IVALUE_EXTRA_KEYS_STYLE.equals(extraKeysStyle)) {
+                 Logger.logError(TermuxSharedProperties.LOG_TAG, "The style \"" + extraKeyDisplayMap + "\" for the key \"" + TermuxPropertyConstants.KEY_EXTRA_KEYS_STYLE + "\" is invalid. Using default style instead.");
+@@ -63,6 +82,8 @@ public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
+             }
+ 
+             mExtraKeysInfo = new ExtraKeysInfo(extrakeys, extraKeysStyle, ExtraKeysConstants.CONTROL_CHARS_ALIASES);
++            mCollapsedExtraKeysInfo = new ExtraKeysInfo("[[{\"key\":\"HIDE_KEYS\",\"display\":\"SHOW KEYS\"}]]",
++                extraKeysStyle, ExtraKeysConstants.CONTROL_CHARS_ALIASES);
+         } catch (JSONException e) {
+             Logger.showToast(mActivity, "Could not load and set the \"" + TermuxPropertyConstants.KEY_EXTRA_KEYS + "\" property from the properties file: " + e.toString(), true);
+             Logger.logStackTraceWithMessage(LOG_TAG, "Could not load and set the \"" + TermuxPropertyConstants.KEY_EXTRA_KEYS + "\" property from the properties file: ", e);
+@@ -78,13 +99,17 @@ public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
+     }
+ 
+     public ExtraKeysInfo getExtraKeysInfo() {
+-        return mExtraKeysInfo;
++        return mKeysCollapsed && mCollapsedExtraKeysInfo != null ? mCollapsedExtraKeysInfo : mExtraKeysInfo;
+     }
+ 
+     @SuppressLint("RtlHardcoded")
+     @Override
+     public void onTerminalExtraKeyButtonClick(View view, String key, boolean ctrlDown, boolean altDown, boolean shiftDown, boolean fnDown) {
+-        if ("KEYBOARD".equals(key)) {
++        if ("HIDE_KEYS".equals(key)) {
++            // Hide every other key and keep only this button; press it again to bring them back.
++            mKeysCollapsed = !mKeysCollapsed;
++            view.post(mActivity::reloadExtraKeys);
++        } else if ("KEYBOARD".equals(key)) {
+             if(mTermuxTerminalViewClient != null)
+                 mTermuxTerminalViewClient.onToggleSoftKeyboardRequest();
+         } else if ("DRAWER".equals(key)) {
+@@ -100,9 +125,45 @@ public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
+                         TerminalView terminalView = mTermuxTerminalViewClient.getActivity().getTerminalView();
+             if (terminalView != null && terminalView.mEmulator != null)
+                 terminalView.mEmulator.toggleAutoScrollDisabled();
++        } else if ("CLEAR".equals(key) ||
++                   "SELECT_ALL".equals(key) || "COPY".equals(key)) {
++            TerminalView terminalView = mTermuxTerminalViewClient.getActivity().getTerminalView();
++            handleTerminalAction(terminalView, key);
+         } else {
+             super.onTerminalExtraKeyButtonClick(view, key, ctrlDown, altDown, shiftDown, fnDown);
+         }
+     }
+ 
++    private void handleTerminalAction(TerminalView terminalView, String action) {
++        if (terminalView == null || terminalView.mEmulator == null ||
++            terminalView.mTermSession == null) return;
++
++        TerminalBuffer screen = terminalView.mEmulator.getScreen();
++        int firstRow = -screen.getActiveTranscriptRows();
++        int lastRow = terminalView.mEmulator.mRows - 1;
++
++        if ("SELECT_ALL".equals(action)) {
++            terminalView.selectTextRange(firstRow, lastRow);
++            return;
++        }
++
++        if ("COPY".equals(action)) {
++            String selectedText = terminalView.getSelectedText();
++            if (selectedText == null || selectedText.isEmpty()) {
++                Logger.showToast(mActivity, "Select text before copying", true);
++                return;
++            }
++            terminalView.stopTextSelectionMode();
++            terminalView.mTermSession.onCopyTextToClipboard(selectedText);
++            return;
++        }
++
++        if ("CLEAR".equals(action)) {
++            // Drop scrollback, then Ctrl+L so the shell wipes the screen and redraws a single prompt.
++            screen.clearTranscript();
++            terminalView.mTermSession.writeCodePoint(false, 12);
++            terminalView.onScreenUpdated();
++        }
++    }
++
+ }
+diff --git a/terminal-view/src/main/java/com/termux/view/TerminalView.java b/terminal-view/src/main/java/com/termux/view/TerminalView.java
+index f4f82ad..e33d5c3 100644
+--- a/terminal-view/src/main/java/com/termux/view/TerminalView.java
++++ b/terminal-view/src/main/java/com/termux/view/TerminalView.java
+@@ -1382,6 +1382,13 @@ public final class TerminalView extends View {
+         getTextSelectionCursorController().show(event);
+     }
+ 
++    /** Select whole rows from {@code startRow} to {@code endRow} (negative rows are scrollback). */
++    public void selectTextRange(int startRow, int endRow) {
++        if (mEmulator == null) return;
++        getTextSelectionCursorController().showRange(startRow, endRow);
++        invalidate();
++    }
++
+     private boolean hideTextSelectionCursors() {
+         return getTextSelectionCursorController().hide();
+     }
+diff --git a/terminal-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java b/terminal-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
+index c2cd7c6..626d4d9 100644
+--- a/termux-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
++++ b/termux-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
+@@ -53,6 +53,20 @@ public class TextSelectionCursorController implements CursorController {
+         mSelX1 = 0;
+         mSelY1 = startRow;
+         mSelX2 = terminalView.mEmulator.mColumns - 1;
+         mSelY2 = endRow;
++        mStartHandle.positionAtCursor(mSelX1, mSelY1, true);
++        mEndHandle.positionAtCursor(mSelX2 + 1, mSelY2, true);
++
++        setActionModeCallBacks();
++        mShowStartTime = System.currentTimeMillis();
++        mIsSelectingText = true;
++    }
++
++    @Override
++    public boolean hide() {
++        if (!isActive()) return false;
++        hideTextSelectionCursors();
++        mIsSelectingText = false;
++        return true;
++    }
++
++}
+diff --git a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java b/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
+index 534936f..e496717 100644
+--- a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java b/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
+@@ -654,7 +654,7 @@ public final class TermuxConstants {
+ 
+ 
+     /** Termux app $HOME directory path */
+-    public static final String TERMUX_HOME_DIR_PATH = TERMUX_FILES_DIR_PATH + "/home"; // Default: "/data/data/com.termux/files/home"
++    public static final String TERMUX_HOME_DIR_PATH = "/storage/emulated/0/Termux"; // Default: "/data/data/com.termux/files/home"
+     /** Termux app $HOME directory */
+     public static final File TERMUX_HOME_DIR = new File(TERMUX_HOME_DIR_PATH);
+ 
+diff --git a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java b/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
+index acabc47..53beaed 100644
+--- a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java b/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
+@@ -76,6 +76,8 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
+             environment.putAll(termuxApiAppEnvironment);
+ 
+         environment.put(ENV_HOME, TermuxConstants.TERMUX_HOME_DIR_PATH);
++        // bin/login skips the welcome message when this is set.
++        environment.put("TERMUX_HUSHLOGIN", "1");
+         environment.put(ENV_PREFIX, TermuxConstants.TERMUX_PREFIX_DIR_PATH);
+ 
+         // If failsafe is not enabled, then we keep default PATH and TMPDIR so that system binaries can be used
