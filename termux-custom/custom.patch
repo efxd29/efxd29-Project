@@ -325,7 +325,8 @@ index c2cd7c6..626d4d9 100644
 
 diff --git a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java b/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
 index 534936f..e496717 100644
---- a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java b/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
+--- a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
++++ b/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
 @@ -654,7 +654,7 @@ public final class TermuxConstants {
  
  
