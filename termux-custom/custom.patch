@@ -295,8 +295,8 @@ index f4f82ad..e33d5c3 100644
      }
 diff --git a/terminal-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java b/terminal-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
 index c2cd7c6..626d4d9 100644
---- a/termux-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
-+++ b/termux-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
+--- a/terminal-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
++++ b/terminal-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
 @@ -53,11 +53,25 @@ public class TextSelectionCursorController implements CursorController {
          mIsSelectingText = true;
      }
