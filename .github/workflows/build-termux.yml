@@ -39,7 +39,11 @@ jobs:
 
       - name: Apply custom patch
         working-directory: termux-app
-        run: git apply --check ../custom/termux-custom/custom.patch && git apply ../custom/termux-custom/custom.patch
+        run: |
+          git apply --check ../custom/termux-custom/custom.patch
+          git apply ../custom/termux-custom/custom.patch
+          cp ../custom/termux-custom/overrides/TermuxTerminalExtraKeys.java app/src/main/java/com/termux/app/terminal/io/TermuxTerminalExtraKeys.java
+          cp ../custom/termux-custom/overrides/TextSelectionCursorController.java terminal-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
 
       - name: Restore signing keystore
         run: |
