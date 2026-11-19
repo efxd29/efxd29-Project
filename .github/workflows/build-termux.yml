@@ -48,22 +48,12 @@ jobs:
           from pathlib import Path
           p = Path("app/src/main/java/com/termux/app/terminal/TermuxTerminalSessionActivityClient.java")
           s = p.read_text()
-          old_title = """        if (updatedSession != mActivity.getCurrentSession()) {
-                      // Only show toast for other sessions than the current one, since the user
-                      // probably consciously caused the title change to change in the current session
-                      // and don't want an annoying toast for that.
-                      mActivity.showToast(toToastTitle(updatedSession), true);
-                  }"""
-          if old_title not in s:
-              raise SystemExit("Could not find background-session title toast block; refusing partial build")
-          s = s.replace(old_title, """        // Custom build: suppress background-session title toasts so they do not cover other sessions.""", 1)
-          old_switch = """        if (!mActivity.getProperties().areTerminalSessionChangeToastsDisabled()) {
-                      TerminalSession session = mActivity.getCurrentSession();
-                      mActivity.showToast(toToastTitle(session), false);
-                  }"""
-          if old_switch not in s:
-              raise SystemExit("Could not find session-switch toast block; refusing partial build")
-          s = s.replace(old_switch, """        // Custom build: suppress session-switch toasts.""", 1)
+          title_toast = "            mActivity.showToast(toToastTitle(updatedSession), true);"
+          switch_toast = "            mActivity.showToast(toToastTitle(session), false);"
+          if title_toast not in s or switch_toast not in s:
+              raise SystemExit("Could not find expected session toast calls; refusing partial build")
+          s = s.replace(title_toast, "            // Custom build: suppress background-session title toast.", 1)
+          s = s.replace(switch_toast, "            // Custom build: suppress session-switch toast.", 1)
           p.write_text(s)
           PY
 
