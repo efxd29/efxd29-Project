@@ -205,7 +205,7 @@ diff --git a/terminal-view/src/main/java/com/termux/view/TerminalView.java b/ter
 index f4f82ad..e33d5c3 100644
 --- a/terminal-view/src/main/java/com/termux/view/TerminalView.java
 +++ b/terminal-view/src/main/java/com/termux/view/TerminalView.java
-@@ -462,5 +462,6 @@ public final class TerminalView extends View {
+@@ -462,4 +462,5 @@ public final class TerminalView extends View {
          int rowsInHistory = mEmulator.getScreen().getActiveTranscriptRows();
          if (mTopRow < -rowsInHistory) setTopRow(-rowsInHistory);
  
