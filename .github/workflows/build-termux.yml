@@ -6,6 +6,11 @@ on:
     paths:
       - 'termux-custom/**'
       - '.github/workflows/build-termux.yml'
+  pull_request:
+    branches: [termux-apk]
+    paths:
+      - 'termux-custom/**'
+      - '.github/workflows/build-termux.yml'
   workflow_dispatch:
 
 permissions:
@@ -21,7 +26,7 @@ jobs:
       - name: Checkout custom files
         uses: actions/checkout@v4
         with:
-          ref: termux-apk
+          ref: ${{ github.head_ref || 'termux-apk' }}
           path: custom
 
       - name: Checkout upstream Termux
@@ -87,6 +92,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish APK release
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: termux-custom-${{ github.run_number }}
