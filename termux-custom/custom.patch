@@ -156,53 +156,11 @@ index b141499..97e50bc 100644
      private static Error ensureDirectoryExists(File directory) {
          return FileUtils.createDirectoryFile(directory.getAbsolutePath());
      }
-diff --git a/terminal-view/src/main/java/com/termux/view/TerminalView.java b/terminal-view/src/main/java/com/termux/view/TerminalView.java
-index f4f82ad..e33d5c3 100644
---- a/terminal-view/src/main/java/com/termux/view/TerminalView.java
-+++ b/terminal-view/src/main/java/com/termux/view/TerminalView.java
-@@ -1382,6 +1382,13 @@ public final class TerminalView extends View {
-         getTextSelectionCursorController().show(event);
-     }
- 
-+    /** Select whole rows from {@code startRow} to {@code endRow} (negative rows are scrollback). */
-+    public void selectTextRange(int startRow, int endRow) {
-+        if (mEmulator == null) return;
-+        getTextSelectionCursorController().showRange(startRow, endRow);
-+        invalidate();
-+    }
-+
-     private boolean hideTextSelectionCursors() {
-         return getTextSelectionCursorController().hide();
-     }
-diff --git a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java b/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
-index 534936f..e496717 100644
---- a/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
-+++ b/termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
-@@ -654,7 +654,7 @@ public final class TermuxConstants {
- 
- 
-     /** Termux app $HOME directory path */
--    public static final String TERMUX_HOME_DIR_PATH = TERMUX_FILES_DIR_PATH + "/home"; // Default: "/data/data/com.termux/files/home"
-+    public static final String TERMUX_HOME_DIR_PATH = "/storage/emulated/0/Termux"; // Default: "/data/data/com.termux/files/home"
-     /** Termux app $HOME directory */
-     public static final File TERMUX_HOME_DIR = new File(TERMUX_HOME_DIR_PATH);
- 
-diff --git a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java b/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
-index acabc47..53beaed 100644
---- a/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
-+++ b/termux-shared/src/main/java/com/termux/shared/termux/shell/command/environment/TermuxShellEnvironment.java
-@@ -76,6 +76,8 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
-             environment.putAll(termuxApiAppEnvironment);
- 
-         environment.put(ENV_HOME, TermuxConstants.TERMUX_HOME_DIR_PATH);
-+        // bin/login skips the welcome message when this is set.
-+        environment.put("TERMUX_HUSHLOGIN", "1");
-         environment.put(ENV_PREFIX, TermuxConstants.TERMUX_PREFIX_DIR_PATH);
- 
-         // If failsafe is not enabled, then we keep default PATH and TMPDIR so that system binaries can be used@@ -465,7 +472,8 @@ public final class TerminalView extends View {
+@@ -465,7 +472,8 @@ public final class TerminalView extends View {
          int rowsInHistory = mEmulator.getScreen().getActiveTranscriptRows();
          if (mTopRow < -rowsInHistory) setTopRow(-rowsInHistory);
  
 -        if (isSelectingText() || mEmulator.isAutoScrollDisabled()) {
 +        // Preserve a manually selected scrollback position while new output arrives.
 +        if (isSelectingText() || mEmulator.isAutoScrollDisabled() || mTopRow != 0) {
+
