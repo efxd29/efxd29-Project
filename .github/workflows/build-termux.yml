@@ -49,7 +49,7 @@ jobs:
           p = Path("terminal-view/src/main/java/com/termux/view/TerminalView.java")
           s = p.read_text()
           old = "        if (isSelectingText() || mEmulator.isAutoScrollDisabled()) {"
-          new = "        // Keep the user's scrollback position while commands continue producing output.\\n        if (isSelectingText() || mEmulator.isAutoScrollDisabled() || mTopRow != 0) {"
+          new = "        // Keep the user's scrollback position while commands continue producing output.\n        if (isSelectingText() || mEmulator.isAutoScrollDisabled() || mTopRow != 0) {"
           if s.count(old) != 1:
               raise SystemExit("Could not find the unique terminal auto-scroll condition")
           p.write_text(s.replace(old, new, 1))
