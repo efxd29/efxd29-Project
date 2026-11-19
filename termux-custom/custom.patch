@@ -200,3 +200,12 @@ index acabc47..53beaed 100644
          environment.put(ENV_PREFIX, TermuxConstants.TERMUX_PREFIX_DIR_PATH);
  
          // If failsafe is not enabled, then we keep default PATH and TMPDIR so that system binaries can be used
+
+diff --git a/terminal-view/src/main/java/com/termux/view/TerminalView.java b/terminal-view/src/main/java/com/termux/view/TerminalView.java
+index f4f82ad..e33d5c3 100644
+--- a/terminal-view/src/main/java/com/termux/view/TerminalView.java
++++ b/terminal-view/src/main/java/com/termux/view/TerminalView.java
+@@ -1490,7 +1490,7 @@ public final class TerminalView extends View {
+-        if (isSelectingText() || mEmulator.isAutoScrollDisabled()) {
++        // Preserve a manually selected scrollback position while new output arrives.
++        if (isSelectingText() || mEmulator.isAutoScrollDisabled() || mTopRow != 0) {
