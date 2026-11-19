@@ -1,0 +1,13 @@
+# Prompt + title ala Terminal macOS.
+# The native title bar reads the title (OSC 0) set here: "-zsh" while idle, the command name while it runs.
+HOST_NAME="efxd29"
+
+PROMPT='@${HOST_NAME} %~ %# '
+
+autoload -Uz add-zsh-hook
+
+_titlebar_idle() { print -rn -- $'\e]0;-zsh\a' }
+_titlebar_run()  { print -rn -- $'\e]0;'"${1%% *}"$'\a' }
+
+add-zsh-hook precmd  _titlebar_idle
+add-zsh-hook preexec _titlebar_run
