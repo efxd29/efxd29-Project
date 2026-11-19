@@ -1,6 +1,7 @@
 package com.termux.app.terminal.io;
 
 import android.annotation.SuppressLint;
+import android.app.AlertDialog;
 import android.view.Gravity;
 import android.view.View;
 
@@ -11,6 +12,7 @@ import com.termux.app.TermuxActivity;
 import com.termux.app.terminal.TermuxTerminalSessionActivityClient;
 import com.termux.app.terminal.TermuxTerminalViewClient;
 import com.termux.shared.logger.Logger;
+import com.termux.shared.termux.TermuxConstants;
 import com.termux.shared.termux.extrakeys.ExtraKeysConstants;
 import com.termux.shared.termux.extrakeys.ExtraKeysInfo;
 import com.termux.shared.termux.settings.properties.TermuxPropertyConstants;
@@ -22,6 +24,11 @@ import com.termux.view.TerminalView;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.util.Properties;
 
 public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
 
@@ -70,6 +77,7 @@ public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
             actionRow.put(new JSONObject().put("key", "COPY").put("display", "COPY"));
             actionRow.put(new JSONObject().put("key", "PASTE").put("display", "PASTE"));
             actionRow.put(new JSONObject().put("key", "ENTER").put("display", "ENTER"));
+            actionRow.put(new JSONObject().put("key", "TOOLS").put("display", "TOOLS"));
             keysMatrix.put(actionRow);
             extrakeys = keysMatrix.toString();
 
@@ -110,23 +118,110 @@ public class TermuxTerminalExtraKeys extends TerminalExtraKeys {
             if(mTermuxTerminalViewClient != null)
                 mTermuxTerminalViewClient.onToggleSoftKeyboardRequest();
         } else if ("DRAWER".equals(key)) {
-            DrawerLayout drawerLayout = mTermuxTerminalViewClient.getActivity().getDrawer();
-            if (drawerLayout.isDrawerOpen(Gravity.LEFT))
-                drawerLayout.closeDrawer(Gravity.LEFT);
-            else
-                drawerLayout.openDrawer(Gravity.LEFT);
+            toggleSessionDrawer();
+        } else if ("TOOLS".equals(key)) {
+            showQuickTools();
         } else if ("PASTE".equals(key)) {
             if(mTermuxTerminalSessionActivityClient != null)
                 mTermuxTerminalSessionActivityClient.onPasteTextFromClipboard(null);
         }  else if ("SCROLL".equals(key)) {
-            TerminalView terminalView = mTermuxTerminalViewClient.getActivity().getTerminalView();
-            if (terminalView != null && terminalView.mEmulator != null)
-                terminalView.mEmulator.toggleAutoScrollDisabled();
+            toggleAutoScroll();
         } else if ("CLEAR".equals(key) || "SELECT_ALL".equals(key) || "COPY".equals(key)) {
             TerminalView terminalView = mTermuxTerminalViewClient.getActivity().getTerminalView();
             handleTerminalAction(terminalView, key);
         } else {
             super.onTerminalExtraKeyButtonClick(view, key, ctrlDown, altDown, shiftDown, fnDown);
+        }
+    }
+
+    private void showQuickTools() {
+        final String[] items = {
+            "Terminal text smaller",
+            "Terminal text larger",
+            "Toggle auto-scroll",
+            "Show / hide Android keyboard",
+            "Open session drawer",
+            "Color: Midnight",
+            "Color: Emerald",
+            "Color: Rose",
+            "Color: Paper"
+        };
+        new AlertDialog.Builder(mActivity)
+            .setTitle("Termux quick tools")
+            .setItems(items, (dialog, which) -> {
+                switch (which) {
+                    case 0:
+                        if (mTermuxTerminalViewClient != null) mTermuxTerminalViewClient.changeFontSize(false);
+                        break;
+                    case 1:
+                        if (mTermuxTerminalViewClient != null) mTermuxTerminalViewClient.changeFontSize(true);
+                        break;
+                    case 2:
+                        toggleAutoScroll();
+                        break;
+                    case 3:
+                        if (mTermuxTerminalViewClient != null) mTermuxTerminalViewClient.onToggleSoftKeyboardRequest();
+                        break;
+                    case 4:
+                        toggleSessionDrawer();
+                        break;
+                    case 5:
+                        applyColorPreset("Midnight", "#E6EDF3", "#10131A", "#FFD866");
+                        break;
+                    case 6:
+                        applyColorPreset("Emerald", "#C8F7DC", "#071B16", "#51FAAA");
+                        break;
+                    case 7:
+                        applyColorPreset("Rose", "#FFE4F0", "#1B1018", "#FF78B8");
+                        break;
+                    case 8:
+                        applyColorPreset("Paper", "#242424", "#F4F1E8", "#B45309");
+                        break;
+                    default:
+                        break;
+                }
+            })
+            .setNegativeButton(android.R.string.cancel, null)
+            .show();
+    }
+
+    private void toggleAutoScroll() {
+        TerminalView terminalView = mActivity.getTerminalView();
+        if (terminalView != null && terminalView.mEmulator != null)
+            terminalView.mEmulator.toggleAutoScrollDisabled();
+    }
+
+    private void toggleSessionDrawer() {
+        if (mTermuxTerminalViewClient == null) return;
+        DrawerLayout drawerLayout = mTermuxTerminalViewClient.getActivity().getDrawer();
+        if (drawerLayout == null) return;
+        if (drawerLayout.isDrawerOpen(Gravity.LEFT))
+            drawerLayout.closeDrawer(Gravity.LEFT);
+        else
+            drawerLayout.openDrawer(Gravity.LEFT);
+    }
+
+    private void applyColorPreset(String name, String foreground, String background, String cursor) {
+        File colorsFile = TermuxConstants.TERMUX_COLOR_PROPERTIES_FILE;
+        File parent = colorsFile.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+            Logger.showToast(mActivity, "Cannot create .termux settings folder", true);
+            return;
+        }
+
+        Properties colors = new Properties();
+        colors.setProperty("foreground", foreground);
+        colors.setProperty("background", background);
+        colors.setProperty("cursor", cursor);
+
+        try (FileOutputStream output = new FileOutputStream(colorsFile, false)) {
+            colors.store(output, "Termux custom color preset: " + name);
+            if (mTermuxTerminalSessionActivityClient != null)
+                mTermuxTerminalSessionActivityClient.checkForFontAndColors();
+            Logger.showToast(mActivity, "Terminal color: " + name, false);
+        } catch (IOException e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Could not apply terminal color preset: ", e);
+            Logger.showToast(mActivity, "Could not save terminal colors", true);
         }
     }
 
