@@ -46,6 +46,16 @@ jobs:
           cp ../custom/termux-custom/overrides/TextSelectionCursorController.java terminal-view/src/main/java/com/termux/view/textselection/TextSelectionCursorController.java
           python3 - <<'PY'
           from pathlib import Path
+          p = Path("terminal-view/src/main/java/com/termux/view/TerminalView.java")
+          s = p.read_text()
+          old = "        if (isSelectingText() || mEmulator.isAutoScrollDisabled()) {"
+          new = "        // Keep the user's scrollback position while commands continue producing output.\\n        if (isSelectingText() || mEmulator.isAutoScrollDisabled() || mTopRow != 0) {"
+          if s.count(old) != 1:
+              raise SystemExit("Could not find the unique terminal auto-scroll condition")
+          p.write_text(s.replace(old, new, 1))
+          PY
+          python3 - <<'PY'
+          from pathlib import Path
           p = Path("app/src/main/java/com/termux/app/terminal/TermuxTerminalSessionActivityClient.java")
           s = p.read_text()
           title_toast = "            mActivity.showToast(toToastTitle(updatedSession), true);"
