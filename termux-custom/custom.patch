@@ -160,13 +160,6 @@ diff --git a/terminal-view/src/main/java/com/termux/view/TerminalView.java b/ter
 index f4f82ad..e33d5c3 100644
 --- a/terminal-view/src/main/java/com/termux/view/TerminalView.java
 +++ b/terminal-view/src/main/java/com/termux/view/TerminalView.java
-@@ -462,4 +462,5 @@ public final class TerminalView extends View {
-         int rowsInHistory = mEmulator.getScreen().getActiveTranscriptRows();
-         if (mTopRow < -rowsInHistory) setTopRow(-rowsInHistory);
- 
--        if (isSelectingText() || mEmulator.isAutoScrollDisabled()) {
-+        // Preserve a manually selected scrollback position while new output arrives.
-+        if (isSelectingText() || mEmulator.isAutoScrollDisabled() || mTopRow != 0) {
 @@ -1382,6 +1382,13 @@ public final class TerminalView extends View {
          getTextSelectionCursorController().show(event);
      }
